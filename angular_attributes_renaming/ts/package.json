@@ -9,7 +9,9 @@
   "scripts": {
     "build": "tsc",
     "start": "npm run build && node dist/angular_io_tool.js",
-    "angular-io-tool": "node dist/angular_io_tool.js"
+    "angular-io-tool": "node dist/angular_io_tool.js",
+    "test": "npm run build && node scripts/test-local-commit.js",
+    "test:commit": "npm run test"
   },
   "engines": {
     "node": ">=16"

@@ -17,7 +17,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
-import { resolveToken, runCommitCommand } from "./commit";
+import { runCommitCommand } from "./commit";
 import { gitRemoteUrl, gitTopLevel, pathRelativeToRepo } from "./git/local";
 import {
   ChangeRun,
@@ -86,7 +86,6 @@ interface CommandOptions {
   targetBranch?: string;
   commitTitle?: string;
   commitBody?: string;
-  gitAccessToken?: string;
   commitDryRun?: boolean;
 }
 
@@ -1106,7 +1105,7 @@ function recordAppliedRun(
   console.log(dim(`  Saved to ${file}`));
   console.log(
     dim(
-      `  Commit later with: node dist/angular_io_tool.js commit ${hash} --branch-name <name> --target-branch <base>`
+      `  Commit locally later with: node dist/angular_io_tool.js commit ${hash} --branch-name <name> --target-branch <base> --title "<msg>"`
     )
   );
   return hash;
@@ -1702,7 +1701,7 @@ async function topLevelMenu(): Promise<
   console.log("  2) report  - write markdown/json report");
   console.log("  3) rename  - rename bindings (dry-run by default)");
   console.log("  4) remove  - remove bindings (dry-run by default)");
-  console.log("  5) commit  - commit a recorded change run + open PRs");
+  console.log("  5) commit  - local commit of a recorded change run");
   console.log("  6) quit");
   while (true) {
     const choice = (await ask(rl, "Choose [1-6]: ")).trim();
@@ -1746,8 +1745,7 @@ function needsInteractive(opts: Partial<CommandOptions>): boolean {
       opts.commitHash &&
       opts.branchName &&
       opts.targetBranch &&
-      opts.commitTitle &&
-      (opts.gitAccessToken || resolveToken())
+      opts.commitTitle
     );
   }
   if (!opts.selector) {
@@ -1770,7 +1768,7 @@ async function interactiveCommit(
   rl: readline.Interface,
   partial: Partial<CommandOptions>
 ): Promise<CommandOptions> {
-  console.log(bold("\nInteractive commit\n"));
+  console.log(bold("\nInteractive commit (local only — no push/PR)\n"));
   const commitHash =
     partial.commitHash ||
     (await promptText(rl, "Change run hash id", { required: true }));
@@ -1781,26 +1779,16 @@ async function interactiveCommit(
     }));
   const targetBranch =
     partial.targetBranch ||
-    (await promptText(rl, "Target branch for PR base (--target-branch)", {
+    (await promptText(rl, "Base branch to create from (--target-branch)", {
       required: true,
     }));
   const commitTitle =
     partial.commitTitle ||
-    (await promptText(rl, "Commit / PR title", { required: true }));
+    (await promptText(rl, "Commit title", { required: true }));
   const commitBody =
     partial.commitBody !== undefined
       ? partial.commitBody
-      : await promptText(rl, "Commit / PR description (optional)", {});
-  let gitAccessToken = partial.gitAccessToken || resolveToken() || "";
-  if (!gitAccessToken) {
-    gitAccessToken = await promptText(
-      rl,
-      "Git access token (or set GIT_ACCESS_TOKEN)",
-      { required: true }
-    );
-  } else {
-    console.log(dim("Using GIT_ACCESS_TOKEN / provided token."));
-  }
+      : await promptText(rl, "Commit description (optional)", {});
 
   const opts: CommandOptions = {
     command: "commit",
@@ -1813,7 +1801,6 @@ async function interactiveCommit(
     targetBranch,
     commitTitle,
     commitBody,
-    gitAccessToken,
     commitDryRun: partial.commitDryRun,
     interactive: true,
     log: partial.log,
@@ -1821,7 +1808,7 @@ async function interactiveCommit(
   };
 
   console.log();
-  console.log(bold("About to run commit:"));
+  console.log(bold("About to run local commit:"));
   console.log(`  hash:           ${opts.commitHash}`);
   console.log(`  branch-name:    ${opts.branchName}`);
   console.log(`  target-branch:  ${opts.targetBranch}`);
@@ -1861,7 +1848,6 @@ async function maybePrompt(
       targetBranch: partial.targetBranch,
       commitTitle: partial.commitTitle,
       commitBody: partial.commitBody,
-      gitAccessToken: partial.gitAccessToken,
       commitDryRun: partial.commitDryRun,
     };
   }
@@ -1939,10 +1925,10 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
     fail("Provide --target-branch");
   }
   if (!opts.commitTitle) {
-    fail("Provide --title (commit / PR title)");
+    fail("Provide --title");
   }
 
-  console.log(bold("Commit change run"));
+  console.log(bold("Local commit (no push / no PR)"));
   console.log(`  hash:          ${opts.commitHash}`);
   console.log(`  branch-name:   ${opts.branchName}`);
   console.log(`  target-branch: ${opts.targetBranch}`);
@@ -1955,25 +1941,37 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
     targetBranch: opts.targetBranch,
     title: opts.commitTitle,
     body: opts.commitBody || "",
-    token: opts.gitAccessToken || "",
     dryRun: Boolean(opts.commitDryRun),
   });
 
   console.log(bold(`Results for run ${run.hash}:`));
-  const prLines: string[] = [];
+  const successLines: string[] = [];
   for (const result of results) {
     if (result.error) {
       console.log(red(`  ✗ ${result.repoName}: ${result.error}`));
     } else {
       console.log(green(`  ✓ ${result.repoName}`));
+      console.log(`      branch: ${result.branchName}`);
       if (result.commitSha) {
         console.log(dim(`      commit: ${result.commitSha}`));
       }
-      if (result.prUrl) {
-        console.log(`      PR: ${result.prUrl}`);
-        prLines.push(`${result.repoName}: ${result.prUrl}`);
-      }
+      successLines.push(
+        `${result.repoName}\t${result.branchName}\t${result.commitSha || ""}`
+      );
     }
+  }
+
+  if (successLines.length) {
+    console.log();
+    console.log(bold("Local commits ready (repo / branch / sha):"));
+    for (const line of successLines) {
+      console.log(`  ${line}`);
+    }
+    console.log(
+      dim(
+        "Checkout each branch locally, push when ready, then open PRs yourself."
+      )
+    );
   }
 
   const logPath = resolveLogPath(opts);
@@ -1985,8 +1983,10 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
       `branch: ${opts.branchName}`,
       `target: ${opts.targetBranch}`,
       `title: ${opts.commitTitle}`,
-      "pull requests:",
-      ...(prLines.length ? prLines.map((l) => `  - ${l}`) : ["  (none)"]),
+      "local commits:",
+      ...(successLines.length
+        ? successLines.map((l) => `  - ${l}`)
+        : ["  (none)"]),
       ...results
         .filter((r) => r.error)
         .map((r) => `  error ${r.repoName}: ${r.error}`),
@@ -2266,19 +2266,18 @@ function buildProgram(): {
     program
       .command("commit")
       .description(
-        "Commit a recorded rename/remove change run (tool hunks only) and open PRs"
+        "Create local commits for a recorded rename/remove change run (no push/PR)"
       )
       .argument("[hash]", "Change run hash id from a prior --apply")
       .option("--hash <id>", "Change run hash id (alternative to argument)")
-      .option("--branch-name <name>", "Feature branch to create")
-      .option("--target-branch <name>", "Base branch to branch from and PR into")
-      .option("--title <text>", "Commit and pull-request title")
-      .option("--body <text>", "Commit and pull-request description")
+      .option("--branch-name <name>", "Feature branch to create locally")
       .option(
-        "--git-access-token <token>",
-        "Git host token (else GIT_ACCESS_TOKEN env)"
+        "--target-branch <name>",
+        "Base branch to create the feature branch from"
       )
-      .option("--dry-run", "Prepare locally but skip commit/push/PR", false)
+      .option("--title <text>", "Commit title")
+      .option("--body <text>", "Commit description")
+      .option("--dry-run", "Prepare locally but skip creating the commit", false)
   );
   commitCmd.action((hashArg: string | undefined, options: Record<string, unknown>) => {
     partial = {
@@ -2295,7 +2294,6 @@ function buildProgram(): {
       targetBranch: (options.targetBranch as string) || undefined,
       commitTitle: (options.title as string) || undefined,
       commitBody: (options.body as string) || undefined,
-      gitAccessToken: (options.gitAccessToken as string) || undefined,
       commitDryRun: Boolean(options.dryRun),
       interactive: Boolean(options.interactive),
       log:

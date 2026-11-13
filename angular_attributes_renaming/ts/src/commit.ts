@@ -1,12 +1,9 @@
 import * as fs from "fs";
 import * as path from "path";
-import { getAdapter } from "./git/adapters";
-import { parseRemoteUrl } from "./git/detect";
 import {
   applyToolDelta,
   currentBranch,
   git,
-  gitRemoteUrl,
   pathRelativeToRepo,
   readFileAtRef,
   stashPop,
@@ -20,67 +17,26 @@ export interface CommitOptions {
   targetBranch: string;
   title: string;
   body: string;
-  token: string;
   dryRun?: boolean;
 }
 
 export interface CommitRepoResult {
   repoName: string;
   repoRoot: string;
+  branchName: string;
   commitSha?: string;
-  prUrl?: string;
   error?: string;
 }
 
-function resolveToken(explicit?: string): string | undefined {
-  if (explicit && explicit.trim()) {
-    return explicit.trim();
-  }
-  const env = process.env.GIT_ACCESS_TOKEN;
-  if (env && env.trim()) {
-    return env.trim();
-  }
-  return undefined;
-}
-
-export { resolveToken };
-
 /**
- * Prefer HTTPS + token for GitHub (works from CI/desktop without SSH agent).
- * Falls back to embedding the token in an existing HTTPS remote.
- * Leaves non-GitHub SSH remotes unchanged (caller may still fail on 301).
+ * Resolve a local base ref for branching.
+ * Prefers origin/<target> when fetch works; otherwise uses a local branch.
+ * Fetch failures (including 301) are non-fatal when a local target exists.
  */
-export function resolvePushUrl(remoteUrl: string, token: string): string {
-  const parsed = parseRemoteUrl(remoteUrl);
-  if (parsed && parsed.kind === "github" && token) {
-    return `https://x-access-token:${encodeURIComponent(token)}@github.com/${
-      parsed.owner
-    }/${parsed.repo}.git`;
-  }
-  if (/^https?:\/\//i.test(remoteUrl)) {
-    return remoteUrl.replace(
-      /^(https?:\/\/)/i,
-      `$1x-access-token:${encodeURIComponent(token)}@`
-    );
-  }
-  return remoteUrl;
-}
-
-function ensureTargetRef(repoRoot: string, targetBranch: string): string {
+export function ensureTargetRef(repoRoot: string, targetBranch: string): string {
   const fetch = git(repoRoot, ["fetch", "origin", targetBranch], {
     allowFail: true,
   });
-  if (fetch.status !== 0) {
-    const detail = `${fetch.stderr}\n${fetch.stdout}`.trim();
-    if (/Moved Permanently|HTTP\s*301|\b301\b/i.test(detail)) {
-      throw new Error(
-        `git fetch failed (Moved Permanently / 301).\n${detail}\n` +
-          `Hint: update origin to the current HTTPS URL, e.g.\n` +
-          `  git remote set-url origin https://github.com/<owner>/<repo>.git`
-      );
-    }
-    // Continue — local target branch may still exist.
-  }
 
   const remoteRef = `origin/${targetBranch}`;
   const hasRemote = git(repoRoot, ["rev-parse", "--verify", remoteRef], {
@@ -89,17 +45,18 @@ function ensureTargetRef(repoRoot: string, targetBranch: string): string {
   if (hasRemote.status === 0) {
     return remoteRef;
   }
+
   const hasLocal = git(repoRoot, ["rev-parse", "--verify", targetBranch], {
     allowFail: true,
   });
   if (hasLocal.status === 0) {
     return targetBranch;
   }
+
+  const fetchDetail = `${fetch.stderr}\n${fetch.stdout}`.trim();
   throw new Error(
     `Target branch '${targetBranch}' not found locally or on origin in ${repoRoot}` +
-      (fetch.status !== 0
-        ? `\nFetch output: ${(fetch.stderr || fetch.stdout).trim()}`
-        : "")
+      (fetchDetail ? `\nFetch output: ${fetchDetail}` : "")
   );
 }
 
@@ -122,11 +79,10 @@ function restoreWorktreeFiles(
   }
 }
 
-async function commitOneRepo(
-  _run: ChangeRun,
+function commitOneRepo(
   repo: ChangeRun["repos"][0],
   opts: CommitOptions
-): Promise<CommitRepoResult> {
+): CommitRepoResult {
   const repoRoot = repo.repoRoot;
   const previousBranch = currentBranch(repoRoot);
   const previousContents = new Map<string, string | null>();
@@ -142,7 +98,6 @@ async function commitOneRepo(
   }
 
   try {
-    // Allow branch switch even when rename --apply left files dirty.
     didStash = stashPush(
       repoRoot,
       `angular-io-tool-commit-${opts.hash}-${Date.now()}`
@@ -150,10 +105,8 @@ async function commitOneRepo(
 
     const baseRef = ensureTargetRef(repoRoot, opts.targetBranch);
 
-    // Clear staging area.
     git(repoRoot, ["reset", "HEAD"], { allowFail: true });
 
-    // Create / reset feature branch from target (tree is clean after stash).
     const branchExists = git(
       repoRoot,
       ["rev-parse", "--verify", opts.branchName],
@@ -168,7 +121,6 @@ async function commitOneRepo(
 
     git(repoRoot, ["reset", "HEAD"], { allowFail: true });
 
-    // Apply only tool hunks onto target-branch file versions.
     for (const file of repo.files) {
       const rel =
         file.relativePath || pathRelativeToRepo(repoRoot, file.absolutePath);
@@ -194,9 +146,8 @@ async function commitOneRepo(
       return {
         repoName: repo.repoName,
         repoRoot,
-        commitSha: undefined,
-        prUrl: undefined,
-        error: "dry-run: skipped commit/push/PR",
+        branchName: opts.branchName,
+        error: "dry-run: skipped local commit",
       };
     }
 
@@ -206,56 +157,20 @@ async function commitOneRepo(
     git(repoRoot, ["commit", "-m", message]);
     const sha = git(repoRoot, ["rev-parse", "HEAD"]).stdout.trim();
 
-    const remoteUrl = repo.remoteUrl || gitRemoteUrl(repoRoot);
-    if (!remoteUrl) {
-      throw new Error("No origin remote URL — cannot push or open PR");
-    }
-
-    const pushUrl = resolvePushUrl(remoteUrl, opts.token);
-    try {
-      git(repoRoot, [
-        "push",
-        "-u",
-        pushUrl,
-        `HEAD:refs/heads/${opts.branchName}`,
-        "--force-with-lease",
-      ]);
-    } catch (pushErr) {
-      const msg = pushErr instanceof Error ? pushErr.message : String(pushErr);
-      throw new Error(
-        `Push failed for ${repo.repoName}.\n${msg}\n` +
-          `Remote was: ${remoteUrl}\n` +
-          `Push URL host: ${pushUrl.replace(/x-access-token:[^@]+@/i, "x-access-token:***@")}`
-      );
-    }
-
-    const remote = parseRemoteUrl(remoteUrl);
-    if (!remote) {
-      throw new Error(`Could not parse remote URL: ${remoteUrl}`);
-    }
-    const adapter = getAdapter(remote.kind);
-    const pr = await adapter.createPullRequest(remote, {
-      title: opts.title,
-      body: opts.body,
-      head: opts.branchName,
-      base: opts.targetBranch,
-      token: opts.token,
-    });
-
     return {
       repoName: repo.repoName,
       repoRoot,
+      branchName: opts.branchName,
       commitSha: sha,
-      prUrl: pr.url,
     };
   } catch (err) {
     return {
       repoName: repo.repoName,
       repoRoot,
+      branchName: opts.branchName,
       error: err instanceof Error ? err.message : String(err),
     };
   } finally {
-    // Return to the user's previous branch, then restore dirty worktree.
     try {
       git(repoRoot, ["checkout", "-f", previousBranch], { allowFail: true });
     } catch {
@@ -265,7 +180,6 @@ async function commitOneRepo(
     if (didStash) {
       const popped = stashPop(repoRoot);
       if (!popped.ok) {
-        // Fall back to the in-memory snapshots of tool-touched files.
         restoreWorktreeFiles(previousContents);
       }
     } else {
@@ -274,17 +188,13 @@ async function commitOneRepo(
   }
 }
 
+/**
+ * Create/reset local feature branches and commit tool hunks only.
+ * Does not push or open PRs — no GIT_ACCESS_TOKEN required.
+ */
 export async function runCommitCommand(
   opts: CommitOptions
 ): Promise<{ run: ChangeRun; results: CommitRepoResult[] }> {
-  const token = resolveToken(opts.token);
-  if (!token) {
-    throw new Error(
-      "Git access token required. Set GIT_ACCESS_TOKEN, pass --git-access-token, or enter it interactively."
-    );
-  }
-  const fullOpts = { ...opts, token };
-
   const run = loadChangeRun(opts.hash);
   if (!run.repos.length) {
     throw new Error(`Run ${run.hash} has no repository changes recorded`);
@@ -292,7 +202,7 @@ export async function runCommitCommand(
 
   const results: CommitRepoResult[] = [];
   for (const repo of run.repos) {
-    results.push(await commitOneRepo(run, repo, fullOpts));
+    results.push(commitOneRepo(repo, opts));
   }
 
   run.commit = {
@@ -304,7 +214,6 @@ export async function runCommitCommand(
       repoName: r.repoName,
       repoRoot: r.repoRoot,
       commitSha: r.commitSha,
-      prUrl: r.prUrl,
       error: r.error,
     })),
   };

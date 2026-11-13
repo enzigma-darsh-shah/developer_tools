@@ -36,7 +36,6 @@ export interface ChangeRun {
       repoName: string;
       repoRoot: string;
       commitSha?: string;
-      prUrl?: string;
       error?: string;
     }>;
   };
