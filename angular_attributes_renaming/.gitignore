@@ -1,0 +1,5 @@
+logs/
+__pycache__/
+_parity_*.txt
+ts/node_modules/
+ts/dist/

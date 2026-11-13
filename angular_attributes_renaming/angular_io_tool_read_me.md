@@ -15,38 +15,70 @@ The tool uses **ripgrep (`rg`)** for fast HTML search, then parses each matching
 
 ---
 
+## Two implementations
+
+| | Python | TypeScript / Node |
+|---|---|---|
+| Path | `angular_io_tool.py` | `ts/` (compiled to `ts/dist/angular_io_tool.js`) |
+| Status | Original reference implementation | Port with the same CLI behavior |
+| Interactive prompts | No | Yes |
+| Run logging | No | Yes (on by default) |
+| Keep until… | Trusted baseline for parity checks | You trust the TS version for daily use |
+
+Core `find` / `report` / `rename` / `remove` flag behavior matches between both. Prefer Python if you want the unchanged baseline; use TypeScript for prompts and logs.
+
+---
+
 ## Requirements
 
-- **Python 3.10+** (3.14 is fine)
+### Shared
+
 - **ripgrep (`rg`)** on your `PATH`
 
-Check:
+```powershell
+rg --version
+```
+
+### Python version
+
+- **Python 3.10+**
 
 ```powershell
 python --version
-rg --version
+```
+
+### TypeScript / Node version
+
+- **Node.js 16+**
+- npm (to install dependencies and build once)
+
+```powershell
+node --version
+npm --version
+```
+
+First-time setup for the TS tool:
+
+```powershell
+cd d:\Tools\angular_attributes_renaming\ts
+npm install
+npm run build
+```
+
+Rebuild after pulling changes to `ts/src`:
+
+```powershell
+npm run build
 ```
 
 ---
 
-## Location & how to run
+## How to run
 
-Script path:
-
-```text
-d:\Tools\angular_attributes_renaming\angular_io_tool.py
-```
-
-Run with Python (PowerShell examples below). You can also `cd` into the folder first:
+### Python
 
 ```powershell
 cd d:\Tools\angular_attributes_renaming
-python .\angular_io_tool.py -h
-```
-
-Built-in help:
-
-```powershell
 python .\angular_io_tool.py -h
 python .\angular_io_tool.py find -h
 python .\angular_io_tool.py rename -h
@@ -54,11 +86,39 @@ python .\angular_io_tool.py remove -h
 python .\angular_io_tool.py report -h
 ```
 
+Full path form:
+
+```powershell
+python d:\Tools\angular_attributes_renaming\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
+```
+
+### TypeScript / Node
+
+```powershell
+cd d:\Tools\angular_attributes_renaming\ts
+node .\dist\angular_io_tool.js -h
+node .\dist\angular_io_tool.js find -h
+```
+
+Full path form:
+
+```powershell
+node d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
+```
+
+Optional npm script (from `ts/`):
+
+```powershell
+npm run angular-io-tool -- find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
+```
+
 ---
 
-## Shared options (all commands)
+## Shared options (Python & TypeScript)
 
-### `--selector` (required)
+These flags work the same on both implementations.
+
+### `--selector` (required for non-interactive runs)
 
 Component selector **without** angle brackets:
 
@@ -70,8 +130,6 @@ Component selector **without** angle brackets:
 
 ### `--roots` / `--root` (optional)
 
-Where to search:
-
 | Flag | Meaning |
 |---|---|
 | `--roots PATH [PATH ...]` | One or more parent folders or repo paths |
@@ -82,47 +140,35 @@ Examples:
 
 ```powershell
 # Search under one parent that contains many Angular repos
-python .\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
+--roots D:\angular-repos
 
-# Search multiple explicit roots
-python .\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon --roots D:\repos\app-a D:\repos\app-b
+# Multiple explicit roots
+--roots D:\repos\app-a D:\repos\app-b
 
 # Repeatable --root
-python .\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon --root D:\repos\app-a --root D:\repos\app-b
-
-# No --roots → search from wherever you ran the command
-cd D:\angular-repos
-python d:\Tools\angular_attributes_renaming\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon
+--root D:\repos\app-a --root D:\repos\app-b
 ```
 
-Semicolon-separated paths inside a single argument are also accepted (useful in some scripts):
+Semicolon-separated paths inside a single argument are also accepted:
 
 ```powershell
 --roots "D:\repos\app-a;D:\repos\app-b"
 ```
 
-Skipped folders during search include: `node_modules`, `dist`, `.angular`, `.git`, `coverage`, `tmp`, `out-tsc`, `.idea`, `.vscode`, `__pycache__`.
+Skipped folders: `node_modules`, `dist`, `.angular`, `.git`, `coverage`, `tmp`, `out-tsc`, `.idea`, `.vscode`, `__pycache__`.
 
-### `--inputs` / `--outputs` (optional on `find` / `report`; required on `remove`)
+### `--inputs` / `--outputs`
 
-Property names to match. You can pass **multiple** inputs/outputs in several equivalent forms:
+Property names to match. Multiple forms:
 
 ```powershell
-# Comma-separated
 --inputs isCustomIcon,isUtilityIcon
-
-# Bracket list (quote it in PowerShell so [] is not interpreted)
 --inputs "[isCustomIcon, isUtilityIcon]"
-
-# Space-separated
 --inputs isCustomIcon isUtilityIcon
-
-# Mix with outputs
 --inputs isCustomIcon --outputs iconClick,iconHover
---outputs "[iconClick, iconHover]"
 ```
 
-**Naming:** pass the TypeScript-style name (`isCustomIcon`). The tool also matches the kebab-case template form (`is-custom-icon`).
+Pass the TypeScript-style name (`isCustomIcon`); kebab-case in templates (`is-custom-icon`) is matched automatically.
 
 ### Binding forms recognized in HTML
 
@@ -134,107 +180,79 @@ Property names to match. You can pass **multiple** inputs/outputs in several equ
 | Output binding | `(iconClick)="onClick($event)"` |
 | Kebab-case | `[is-custom-icon]="..."`, `(icon-click)="..."` |
 
-Only tags for the given `--selector` are changed. The same property name on a different component is left alone.
+Only tags for the given `--selector` are changed.
 
 ---
 
 ## Command: `find`
 
-Lists matching usages in the terminal. Paths are printed as:
+Lists matching usages. Paths use absolute `file:line:column` so **Ctrl+Click** works in Cursor / VS Code.
 
-```text
-D:\full\path\to\file.component.html:42:5
-```
-
-In **Cursor / VS Code**, **Ctrl+Click** (or Cmd+Click on macOS) that path to open the file at the line.
-
-### Examples
-
-**Multiple inputs on the same component:**
+### Python
 
 ```powershell
 python .\angular_io_tool.py find `
   --selector abx-icon `
   --inputs "[isCustomIcon, isUtilityIcon]" `
-  --roots D:\angular-repos
-```
-
-**Inputs and outputs together:**
-
-```powershell
-python .\angular_io_tool.py find `
-  --selector abx-icon `
-  --inputs isCustomIcon,isUtilityIcon `
   --outputs iconClick `
   --roots D:\angular-repos
 ```
 
-**Selector only** (every `<abx-icon>` usage, no property filter):
+### TypeScript
+
+```powershell
+node .\dist\angular_io_tool.js find `
+  --selector abx-icon `
+  --inputs "[isCustomIcon, isUtilityIcon]" `
+  --outputs iconClick `
+  --roots D:\angular-repos
+```
+
+**Selector only** (every `<abx-icon>` usage):
 
 ```powershell
 python .\angular_io_tool.py find --selector abx-icon --roots D:\angular-repos
+node .\dist\angular_io_tool.js find --selector abx-icon --roots D:\angular-repos
 ```
-
-### What the output includes
-
-- Component selector and the inputs/outputs you asked for
-- Numbered hits with binding kind (property / attribute / two-way / output)
-- Absolute clickable `file:line:column` paths
-- Repository / project label
-- A short HTML snippet around the tag
-- Summary: repos, files, tags, bindings
 
 ---
 
 ## Command: `report`
 
-Same search as `find`, but writes a durable report.
-
 | Option | Values | Default |
 |---|---|---|
 | `--format` | `markdown`, `json` | `markdown` |
-| `-o` / `--output` | file path | stdout (prints the report) |
+| `-o` / `--output` | file path | stdout |
 
-### Examples
-
-**Markdown file:**
+### Python
 
 ```powershell
 python .\angular_io_tool.py report `
   --selector abx-icon `
   --inputs isCustomIcon,isUtilityIcon `
   --format markdown `
-  -o D:\Tools\angular_attributes_renaming\abx-icon-report.md `
+  -o .\abx-icon-report.md `
   --roots D:\angular-repos
 ```
 
-**JSON file:**
+### TypeScript
 
 ```powershell
-python .\angular_io_tool.py report `
+node .\dist\angular_io_tool.js report `
   --selector abx-icon `
-  --inputs isCustomIcon `
-  --outputs iconClick `
+  --inputs isCustomIcon,isUtilityIcon `
   --format json `
   -o .\usage-report.json `
   --roots D:\angular-repos
 ```
 
-**Print Markdown to the terminal:**
-
-```powershell
-python .\angular_io_tool.py report --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
-```
-
-When `-o` is used, the tool also prints the human-friendly `find`-style summary in the terminal so you still see counts and clickable paths.
+When `-o` is used, a human `find`-style summary is also printed in the terminal.
 
 ---
 
 ## Command: `rename`
 
-Renames input/output binding names in HTML for the given selector.
-
-**Safety:** default is a **dry run** (no files written). Pass `--apply` to write local edits.
+Renames bindings in HTML. **Dry-run by default**; pass `--apply` to write.
 
 ### `--rename` forms
 
@@ -242,153 +260,195 @@ Renames input/output binding names in HTML for the given selector.
 --rename isCustomIcon=isCustom
 --rename isCustomIcon=isCustom,isUtilityIcon=isUtility
 --rename "[isCustomIcon=isCustom, isUtilityIcon=isUtility]"
---rename isCustomIcon=isCustom isUtilityIcon=isUtility
 ```
 
-If a template used kebab-case (`[is-custom-icon]`), the replacement is written in kebab-case when the new name is camelCase (e.g. `isCustom` → `is-custom`).
-
-### Recommended workflow
-
-1. Dry-run and review the affected repos/files list  
-2. Apply  
-3. Review diffs in GitHub Desktop  
-4. Commit manually per repo  
+### Python
 
 ```powershell
-# 1) Dry-run
-python .\angular_io_tool.py rename `
-  --selector abx-icon `
-  --rename isCustomIcon=isCustom `
-  --roots D:\angular-repos
+# Dry-run
+python .\angular_io_tool.py rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos
 
-# 2) Apply locally
-python .\angular_io_tool.py rename `
-  --selector abx-icon `
-  --rename isCustomIcon=isCustom `
-  --roots D:\angular-repos `
-  --apply
+# Apply
+python .\angular_io_tool.py rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
 ```
 
-**Multiple renames in one pass:**
+### TypeScript
 
 ```powershell
-python .\angular_io_tool.py rename `
-  --selector abx-icon `
-  --rename "[isCustomIcon=isCustom, isUtilityIcon=isUtility]" `
-  --roots D:\angular-repos `
-  --apply
+node .\dist\angular_io_tool.js rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos
+node .\dist\angular_io_tool.js rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
 ```
 
-### What the output includes
-
-- Rename plan (`old → new`)
-- Whether it is a dry run or applying
-- **Repositories affected** (name, file count, change count)
-- **Files** with absolute paths and per-change details
-- Each change line uses a Ctrl+Clickable `file:line:column` link (same as `find`)
-- Reminder to review in GitHub Desktop / `git diff` before committing
+Each change line prints a Ctrl+Clickable `file:line:column` link. Review in GitHub Desktop, then commit manually.
 
 ---
 
 ## Command: `remove`
 
-Removes the specified input and/or output bindings from matching component tags.
+Removes the given input/output bindings. Requires `--inputs` and/or `--outputs`. Dry-run by default; `--apply` writes.
 
-**Requires** at least one of `--inputs` or `--outputs`.
-
-**Safety:** dry-run by default; pass `--apply` to write.
-
-### Examples
+### Python
 
 ```powershell
-# Dry-run: remove one input
-python .\angular_io_tool.py remove `
-  --selector abx-icon `
-  --inputs isUtilityIcon `
-  --roots D:\angular-repos
-
-# Remove multiple inputs
-python .\angular_io_tool.py remove `
-  --selector abx-icon `
-  --inputs "[isCustomIcon, isUtilityIcon]" `
-  --roots D:\angular-repos `
-  --apply
-
-# Remove an output binding
-python .\angular_io_tool.py remove `
-  --selector abx-icon `
-  --outputs iconClick `
-  --roots D:\angular-repos `
-  --apply
-
-# Inputs and outputs together
-python .\angular_io_tool.py remove `
-  --selector abx-icon `
-  --inputs isCustomIcon `
-  --outputs iconClick `
-  --roots D:\angular-repos `
-  --apply
+python .\angular_io_tool.py remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos
+python .\angular_io_tool.py remove --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots D:\angular-repos --apply
 ```
 
-Surrounding whitespace / empty attribute lines are cleaned up when an attribute is removed.
+### TypeScript
+
+```powershell
+node .\dist\angular_io_tool.js remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos
+node .\dist\angular_io_tool.js remove --selector abx-icon --outputs iconClick --roots D:\angular-repos --apply
+```
+
+---
+
+## TypeScript-only: interactive prompts
+
+You do **not** need to remember every flag. The TS tool prompts when required values are missing.
+
+### Ways to start interactive mode
+
+```powershell
+cd d:\Tools\angular_attributes_renaming\ts
+
+# Top-level menu (find / report / rename / remove / quit)
+node .\dist\angular_io_tool.js
+
+# Wizard for one command (asks for missing fields)
+node .\dist\angular_io_tool.js find
+node .\dist\angular_io_tool.js report
+node .\dist\angular_io_tool.js rename
+node .\dist\angular_io_tool.js remove
+
+# Force prompts even if some flags are present
+node .\dist\angular_io_tool.js find --interactive
+node .\dist\angular_io_tool.js find -i --selector abx-icon
+```
+
+### What each wizard asks
+
+| Command | Prompts (in order) |
+|---|---|
+| `find` | selector → inputs → outputs → roots → confirm |
+| `report` | selector → inputs → outputs → format → output file → roots → confirm |
+| `rename` | selector → rename pairs (`old=new`) → roots → apply? → confirm |
+| `remove` | selector → inputs → outputs → roots → apply? → confirm |
+
+- Press **Enter** to accept defaults (e.g. roots = current directory, apply = no / dry-run).
+- Type **`q`** to cancel.
+- Full CLI flags still work with **no prompts** when required options are provided.
+
+### After a dry-run (interactive rename/remove)
+
+If you started interactively and chose dry-run, the tool can ask:
+
+```text
+Dry-run complete. Apply these changes now? [y/N]
+```
+
+---
+
+## TypeScript-only: run logging
+
+Every TS run writes a log (unless disabled) so you can track which repos/files were touched.
+
+| Option | Meaning |
+|---|---|
+| *(default)* | Writes `d:\Tools\angular_attributes_renaming\logs\run-<timestamp>.log` |
+| `--log PATH` | Write that specific log file |
+| `--no-log` | Disable logging for this run |
+
+Log contents include:
+
+- timestamp and command
+- selector / inputs / outputs / rename / apply
+- roots
+- repos and files affected
+- full console transcript (ANSI stripped)
+
+Example:
+
+```powershell
+node .\dist\angular_io_tool.js rename `
+  --selector abx-icon `
+  --rename isCustomIcon=isCustom `
+  --roots D:\angular-repos `
+  --log D:\Tools\angular_attributes_renaming\logs\my-rename.log
+```
 
 ---
 
 ## Typical end-to-end flow
 
+### Python (flag-based)
+
 ```powershell
 $tool = "d:\Tools\angular_attributes_renaming\angular_io_tool.py"
 $roots = "D:\angular-repos"
 
-# 1. Discover where a property is used (Ctrl+Click paths in the terminal)
 python $tool find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots $roots
-
-# 2. Optional durable report for sharing / tickets
-python $tool report --selector abx-icon --inputs isCustomIcon,isUtilityIcon -o .\abx-icon-inputs.md --roots $roots
-
-# 3. Preview a rename
 python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots
-
-# 4. Apply the rename locally
 python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots --apply
+# Review in GitHub Desktop, commit manually
+```
 
-# 5. Open GitHub Desktop, review each affected repo, commit manually
+### TypeScript (interactive or flags)
+
+```powershell
+$tool = "d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js"
+$roots = "D:\angular-repos"
+
+# Interactive
+node $tool find
+
+# Or flags (same as Python) + automatic log under ..\logs\
+node $tool find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots $roots
+node $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots --apply
 ```
 
 ---
 
 ## Output & review tips
 
-### Clickable paths (`find` / `report` summary / `rename` / `remove`)
-
-Paths look like:
+### Clickable paths
 
 ```text
 D:\orektic\products\my-app\src\app\header\header.component.html:18:3
 ```
 
-Ctrl+Click in the Cursor/VS Code terminal to jump to that location.  
-`rename` and `remove` print the same `file:line:column` form on each change detail line.
+Ctrl+Click in the Cursor/VS Code terminal. Used by `find`, `report` summaries, and each `rename` / `remove` change line.
 
-### Repository labels (`rename` / `remove`)
+### Repository labels
 
-The tool groups changes by a project/repo label so you can open the right repo in GitHub Desktop. Labels prefer:
-
-1. A git repository that lives under your `--roots` path, or  
-2. The first folder under `--roots` (when searching a parent of many projects)
+Grouped by project/repo under your `--roots` (or git toplevel when applicable) so you can open the right repo in GitHub Desktop.
 
 ### Dry-run vs `--apply`
 
 | Mode | Behavior |
 |---|---|
-| Default (no `--apply`) | Prints what **would** change; writes nothing |
-| `--apply` | Writes HTML files on disk only |
+| Default (no `--apply`) | Preview only |
+| `--apply` | Writes HTML files on disk |
 
-There is no automatic git commit, branch, or PR.
+No automatic git commit, branch, or PR.
 
 ### Environment
 
 - Set `NO_COLOR=1` to disable colored terminal output.
+
+---
+
+## Parity checking (Python vs TypeScript)
+
+While validating the TS port, run the same command on both and compare counts / file edits, e.g. against `_fixture`:
+
+```powershell
+$fix = "d:\Tools\angular_attributes_renaming\_fixture"
+$args = @("find","--roots",$fix,"--selector","abx-icon","--inputs","isCustomIcon,isUtilityIcon")
+
+python d:\Tools\angular_attributes_renaming\angular_io_tool.py @args
+node d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js @args --no-log
+```
 
 ---
 
@@ -405,9 +465,22 @@ After renaming template bindings, update the component TypeScript definitions se
 
 ## Quick reference
 
+### Python
+
 ```text
 python angular_io_tool.py find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...]
 python angular_io_tool.py report --selector SEL [--inputs ...] [--outputs ...] [--format markdown|json] [-o FILE] [--roots ...]
 python angular_io_tool.py rename --selector SEL --rename old=new[,...] [--apply] [--roots ...]
 python angular_io_tool.py remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--roots ...]
+```
+
+### TypeScript
+
+```text
+node dist/angular_io_tool.js                          # interactive menu
+node dist/angular_io_tool.js find                     # interactive find
+node dist/angular_io_tool.js find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...] [--log PATH] [--no-log]
+node dist/angular_io_tool.js report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
+node dist/angular_io_tool.js rename --selector SEL --rename old=new[,...] [--apply] [--roots ...]
+node dist/angular_io_tool.js remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--roots ...]
 ```

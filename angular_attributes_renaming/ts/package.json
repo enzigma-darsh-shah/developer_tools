@@ -1,0 +1,24 @@
+{
+  "name": "angular-io-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Find, rename, or remove Angular component input/output bindings in HTML templates",
+  "bin": {
+    "angular-io-tool": "./dist/angular_io_tool.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/angular_io_tool.js",
+    "angular-io-tool": "node dist/angular_io_tool.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.3.3"
+  }
+}
