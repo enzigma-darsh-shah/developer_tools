@@ -383,6 +383,24 @@ class BindingMatch:
     attr_text: str
 
 
+def _index_inside_quotes(text: str, index: int) -> bool:
+    """Return True if index falls inside a quoted '...' or \"...\" region."""
+    in_quote: str | None = None
+    i = 0
+    while i < len(text) and i < index:
+        ch = text[i]
+        if in_quote:
+            if ch == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            if ch == in_quote:
+                in_quote = None
+        elif ch in ('"', "'"):
+            in_quote = ch
+        i += 1
+    return in_quote is not None
+
+
 def _attr_patterns(name: str) -> list[tuple[str, re.Pattern[str]]]:
     """Build binding patterns for one template name form."""
     esc = re.escape(name)
@@ -392,8 +410,15 @@ def _attr_patterns(name: str) -> list[tuple[str, re.Pattern[str]]]:
         ("two-way", re.compile(rf"\[\({esc}\)\]{value}")),
         ("property", re.compile(rf"\[{esc}\]{value}")),
         ("output", re.compile(rf"\({esc}\){value}")),
-        # Plain attribute last so [x] / (x) win when overlapping conceptually.
-        ("attribute", re.compile(rf"(?<![\w\-\[\(\)\]])\b{esc}\b{value}")),
+        # Attribute name only: not after . / word / binding punctuation, and not
+        # inside quotes (checked separately). Require attr-name position.
+        (
+            "attribute",
+            re.compile(
+                rf"(?<![\w.\-\[\(\)\]#/])\b{esc}\b"
+                rf"(?:\s*=\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')|(?=[\s/>]))"
+            ),
+        ),
     ]
 
 
@@ -428,6 +453,10 @@ def find_bindings_in_tag(
                 continue
             for match in pattern.finditer(tag_text):
                 local_start, local_end = match.start(), match.end()
+                # Never match names that only appear inside quoted attribute values
+                # e.g. *ngIf="... == 'table'" or [abcd]="obj.isCustomIcon".
+                if _index_inside_quotes(tag_text, local_start):
+                    continue
                 # Skip if this looks like part of a larger already-chosen attr.
                 if overlaps(local_start, local_end):
                     continue

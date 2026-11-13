@@ -10,8 +10,11 @@ The tool uses **ripgrep (`rg`)** for fast HTML search, then parses each matching
 | Usage report | `report` | Writes a Markdown or JSON report |
 | Rename properties | `rename` | Renames bindings in templates (dry-run by default) |
 | Remove properties | `remove` | Removes bindings from templates (dry-run by default) |
+| Commit + PR (TS) | `commit` | Commits a recorded apply-run (tool hunks only) and opens GitHub PRs |
 
-**Scope:** HTML templates only (`.html`). It does **not** edit TypeScript `@Input()` / `@Output()` definitions. Mutations only change local files — no branches or PRs are created. Review diffs in GitHub Desktop (or `git diff`) and commit manually.
+**Scope:** HTML templates only (`.html`). It does **not** edit TypeScript `@Input()` / `@Output()` definitions.
+
+**Matching rule:** only real attribute / binding **names** are matched — not the same text inside quoted values (e.g. `[abcd]="obj.isCustomIcon"` or `*ngIf="... == 'table'"` are ignored when searching for `isCustomIcon` / `table`).
 
 ---
 
@@ -20,12 +23,13 @@ The tool uses **ripgrep (`rg`)** for fast HTML search, then parses each matching
 | | Python | TypeScript / Node |
 |---|---|---|
 | Path | `angular_io_tool.py` | `ts/` (compiled to `ts/dist/angular_io_tool.js`) |
-| Status | Original reference implementation | Port with the same CLI behavior |
+| Status | Reference implementation | Port + interactive + logging + commit/PR |
 | Interactive prompts | No | Yes |
 | Run logging | No | Yes (on by default) |
-| Keep until… | Trusted baseline for parity checks | You trust the TS version for daily use |
+| Change-run hash + `commit` | No | Yes (on `--apply`) |
+| Keep until… | Parity baseline | Daily driver once trusted |
 
-Core `find` / `report` / `rename` / `remove` flag behavior matches between both. Prefer Python if you want the unchanged baseline; use TypeScript for prompts and logs.
+Core `find` / `report` / `rename` / `remove` flag behavior matches between both.
 
 ---
 
@@ -312,7 +316,7 @@ You do **not** need to remember every flag. The TS tool prompts when required va
 ```powershell
 cd d:\Tools\angular_attributes_renaming\ts
 
-# Top-level menu (find / report / rename / remove / quit)
+# Top-level menu (find / report / rename / remove / commit / quit)
 node .\dist\angular_io_tool.js
 
 # Wizard for one command (asks for missing fields)
@@ -320,6 +324,7 @@ node .\dist\angular_io_tool.js find
 node .\dist\angular_io_tool.js report
 node .\dist\angular_io_tool.js rename
 node .\dist\angular_io_tool.js remove
+node .\dist\angular_io_tool.js commit
 
 # Force prompts even if some flags are present
 node .\dist\angular_io_tool.js find --interactive
@@ -334,6 +339,7 @@ node .\dist\angular_io_tool.js find -i --selector abx-icon
 | `report` | selector → inputs → outputs → format → output file → roots → confirm |
 | `rename` | selector → rename pairs (`old=new`) → roots → apply? → confirm |
 | `remove` | selector → inputs → outputs → roots → apply? → confirm |
+| `commit` | hash → branch-name → target-branch → title → body → token (if needed) → confirm |
 
 - Press **Enter** to accept defaults (e.g. roots = current directory, apply = no / dry-run).
 - Type **`q`** to cancel.
@@ -365,6 +371,8 @@ Log contents include:
 - selector / inputs / outputs / rename / apply
 - roots
 - repos and files affected
+- change-run hash (after `--apply`)
+- PR URLs (after `commit`)
 - full console transcript (ANSI stripped)
 
 Example:
@@ -375,6 +383,67 @@ node .\dist\angular_io_tool.js rename `
   --rename isCustomIcon=isCustom `
   --roots D:\angular-repos `
   --log D:\Tools\angular_attributes_renaming\logs\my-rename.log
+```
+
+---
+
+## TypeScript-only: change runs + `commit`
+
+When `rename` / `remove` runs with **`--apply`**, the tool records a **change-run hash** under:
+
+```text
+d:\Tools\angular_attributes_renaming\logs\runs\<hash>.json
+d:\Tools\angular_attributes_renaming\logs\runs\index.json
+```
+
+Each run stores per-repo file snapshots (`before` / `after`) so `commit` can stage **only the tool hunks**, even if the working tree has other local edits.
+
+### Auth for push / PR
+
+| Priority | Source |
+|---|---|
+| 1 | Environment variable `GIT_ACCESS_TOKEN` |
+| 2 | `--git-access-token <token>` |
+| 3 | Interactive prompt (commit wizard) |
+
+GitHub is implemented now. Adapters for GitLab / Bitbucket / Azure DevOps / self-hosted are stubbed for later.
+
+### Commit command
+
+```powershell
+$tool = "d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js"
+
+# Interactive
+node $tool commit
+
+# Flags
+node $tool commit <hash> `
+  --branch-name feature/rename-isCustomIcon `
+  --target-branch qa `
+  --title "refactor(abx-icon): rename isCustomIcon to isCustom" `
+  --body "Automated template binding rename across consumers." `
+  --git-access-token $env:GIT_ACCESS_TOKEN
+```
+
+What `commit` does per affected repo:
+
+1. **Stash** local dirty changes (so rename `--apply` worktrees do not block checkout)
+2. Fetch / resolve `--target-branch`
+3. Create / reset `--branch-name` from that target
+4. Clear the staging area
+5. Apply **only** the recorded tool patches onto the target-branch file versions (CRLF/LF normalized) and stage those files
+6. Commit with the same title/body in every repo
+7. Push via **HTTPS + `GIT_ACCESS_TOKEN`** for GitHub (even if `origin` is SSH)
+8. Open a pull request into `--target-branch`
+9. Restore your previous branch and stash; print PR links in the CLI and the run log
+
+You can reuse an existing change-run hash after `--apply` — you do not need to re-rename first.
+
+If a repo still fails with **Moved Permanently / 301**, update that repo's remote URL:
+
+```powershell
+git remote -v
+git remote set-url origin https://github.com/<owner>/<repo>.git
 ```
 
 ---
@@ -393,18 +462,16 @@ python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $
 # Review in GitHub Desktop, commit manually
 ```
 
-### TypeScript (interactive or flags)
+### TypeScript (interactive or flags + commit)
 
 ```powershell
 $tool = "d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js"
 $roots = "D:\angular-repos"
 
-# Interactive
-node $tool find
-
-# Or flags (same as Python) + automatic log under ..\logs\
 node $tool find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots $roots
 node $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots --apply
+# Note the printed change-run hash, then:
+node $tool commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon"
 ```
 
 ---
@@ -483,4 +550,5 @@ node dist/angular_io_tool.js find   --selector SEL [--inputs ...] [--outputs ...
 node dist/angular_io_tool.js report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
 node dist/angular_io_tool.js rename --selector SEL --rename old=new[,...] [--apply] [--roots ...]
 node dist/angular_io_tool.js remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--roots ...]
+node dist/angular_io_tool.js commit [HASH] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT] [--git-access-token TOKEN]
 ```

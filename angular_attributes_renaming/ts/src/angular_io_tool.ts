@@ -17,6 +17,13 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
+import { resolveToken, runCommitCommand } from "./commit";
+import { gitRemoteUrl, gitTopLevel, pathRelativeToRepo } from "./git/local";
+import {
+  ChangeRun,
+  generateRunHash,
+  saveChangeRun,
+} from "./runs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,7 +68,7 @@ interface FileChangePlan {
 }
 
 interface CommandOptions {
-  command: "find" | "report" | "rename" | "remove";
+  command: "find" | "report" | "rename" | "remove" | "commit";
   selector: string;
   inputs: string[];
   outputs: string[];
@@ -73,6 +80,14 @@ interface CommandOptions {
   interactive?: boolean;
   log?: string;
   noLog?: boolean;
+  // commit-only
+  commitHash?: string;
+  branchName?: string;
+  targetBranch?: string;
+  commitTitle?: string;
+  commitBody?: string;
+  gitAccessToken?: string;
+  commitDryRun?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -413,23 +428,6 @@ function normalizeRoots(roots: string[] | undefined | null): string[] {
   return out;
 }
 
-function gitTopLevel(dir: string): string | null {
-  try {
-    const result = spawnSync(
-      "git",
-      ["-C", dir, "rev-parse", "--show-toplevel"],
-      { encoding: "utf8" }
-    );
-    if (result.status !== 0) {
-      return null;
-    }
-    const top = (result.stdout || "").trim();
-    return top ? path.resolve(top) : null;
-  } catch {
-    return null;
-  }
-}
-
 function pathRelative(from: string, to: string): string | null {
   const rel = path.relative(from, to);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -595,6 +593,27 @@ function snippetForSpan(
   return block;
 }
 
+function indexInsideQuotes(text: string, index: number): boolean {
+  let inQuote: string | null = null;
+  let i = 0;
+  while (i < text.length && i < index) {
+    const ch = text[i];
+    if (inQuote) {
+      if (ch === "\\" && i + 1 < text.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === inQuote) {
+        inQuote = null;
+      }
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+    }
+    i += 1;
+  }
+  return inQuote !== null;
+}
+
 function attrPatterns(name: string): Array<[string, RegExp]> {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const value = String.raw`(?:\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))?`;
@@ -602,9 +621,14 @@ function attrPatterns(name: string): Array<[string, RegExp]> {
     ["two-way", new RegExp(String.raw`\[\(${esc}\)\]${value}`, "g")],
     ["property", new RegExp(String.raw`\[${esc}\]${value}`, "g")],
     ["output", new RegExp(String.raw`\(${esc}\)${value}`, "g")],
+    // Attribute name only — never match inside quoted values (checked separately).
     [
       "attribute",
-      new RegExp(String.raw`(?<![\w\-\[\(\)\]])\b${esc}\b${value}`, "g"),
+      new RegExp(
+        String.raw`(?<![\w.\-\[\(\)\]#/])\b${esc}\b` +
+          String.raw`(?:\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?=[\s/>]))`,
+        "g"
+      ),
     ],
   ];
 }
@@ -646,6 +670,11 @@ function findBindingsInTag(
       while ((match = pattern.exec(tagText)) !== null) {
         const localStart = match.index;
         const localEnd = match.index + match[0].length;
+        // Skip names that only appear inside quoted values
+        // e.g. *ngIf="...=='table'" or [abcd]="obj.isCustomIcon".
+        if (indexInsideQuotes(tagText, localStart)) {
+          continue;
+        }
         if (overlaps(localStart, localEnd)) {
           continue;
         }
@@ -1020,10 +1049,81 @@ function formatClickablePath(
   return `${path.resolve(filePath)}:${line}:${column}`;
 }
 
+function recordAppliedRun(
+  plans: FileChangePlan[],
+  meta: {
+    command: "rename" | "remove";
+    selector: string;
+    roots: string[];
+    inputs: string[];
+    outputs: string[];
+    renameMap?: Record<string, string>;
+  }
+): string | null {
+  if (!plans.length) {
+    return null;
+  }
+  const byGitRoot = new Map<string, FileChangePlan[]>();
+  for (const plan of plans) {
+    const root =
+      gitTopLevel(path.dirname(plan.filePath)) ||
+      path.dirname(plan.filePath);
+    const list = byGitRoot.get(root) || [];
+    list.push(plan);
+    byGitRoot.set(root, list);
+  }
+
+  const repos: ChangeRun["repos"] = [];
+  for (const [repoRoot, repoPlans] of byGitRoot) {
+    repos.push({
+      repoRoot,
+      repoName: path.basename(repoRoot),
+      remoteUrl: gitRemoteUrl(repoRoot),
+      files: repoPlans.map((plan) => ({
+        absolutePath: plan.filePath,
+        relativePath: pathRelativeToRepo(repoRoot, plan.filePath),
+        before: plan.original,
+        after: plan.updated,
+      })),
+    });
+  }
+
+  const partial: Omit<ChangeRun, "hash"> = {
+    createdAt: new Date().toISOString(),
+    command: meta.command,
+    selector: meta.selector,
+    renameMap: meta.renameMap,
+    inputs: meta.inputs,
+    outputs: meta.outputs,
+    roots: meta.roots,
+    repos,
+  };
+  const hash = generateRunHash(partial);
+  const run: ChangeRun = { hash, ...partial };
+  const file = saveChangeRun(run);
+  console.log();
+  console.log(green(`Change run recorded: ${bold(hash)}`));
+  console.log(dim(`  Saved to ${file}`));
+  console.log(
+    dim(
+      `  Commit later with: node dist/angular_io_tool.js commit ${hash} --branch-name <name> --target-branch <base>`
+    )
+  );
+  return hash;
+}
+
 function applyPlans(
   plans: FileChangePlan[],
-  apply: boolean
-): { repos: string[]; files: string[] } {
+  apply: boolean,
+  runMeta?: {
+    command: "rename" | "remove";
+    selector: string;
+    roots: string[];
+    inputs: string[];
+    outputs: string[];
+    renameMap?: Record<string, string>;
+  }
+): { repos: string[]; files: string[]; runHash?: string } {
   if (plans.length === 0) {
     console.log(yellow("No matching bindings found — nothing to change."));
     return { repos: [], files: [] };
@@ -1069,6 +1169,7 @@ function applyPlans(
     }
   }
 
+  let runHash: string | undefined;
   if (apply) {
     for (const plan of plans) {
       fs.writeFileSync(plan.filePath, plan.updated, "utf8");
@@ -1076,8 +1177,11 @@ function applyPlans(
     console.log();
     console.log(
       green(`Wrote ${plans.length} file(s).`) +
-        " Review the diffs in GitHub Desktop (or git diff), then commit manually."
+        " Review the diffs in GitHub Desktop (or git diff), then commit with the commit command."
     );
+    if (runMeta) {
+      runHash = recordAppliedRun(plans, runMeta) || undefined;
+    }
   } else {
     console.log();
     console.log(
@@ -1092,6 +1196,7 @@ function applyPlans(
       a.toLowerCase().localeCompare(b.toLowerCase())
     ),
     files: plans.map((p) => p.filePath),
+    runHash,
   };
 }
 
@@ -1588,16 +1693,19 @@ async function interactiveRemove(
   return opts;
 }
 
-async function topLevelMenu(): Promise<"find" | "report" | "rename" | "remove"> {
+async function topLevelMenu(): Promise<
+  "find" | "report" | "rename" | "remove" | "commit"
+> {
   const rl = createRl();
   console.log(bold("Angular IO Tool"));
   console.log("  1) find    - locate input/output usages");
   console.log("  2) report  - write markdown/json report");
   console.log("  3) rename  - rename bindings (dry-run by default)");
   console.log("  4) remove  - remove bindings (dry-run by default)");
-  console.log("  5) quit");
+  console.log("  5) commit  - commit a recorded change run + open PRs");
+  console.log("  6) quit");
   while (true) {
-    const choice = (await ask(rl, "Choose [1-5]: ")).trim();
+    const choice = (await ask(rl, "Choose [1-6]: ")).trim();
     if (choice === "1" || choice.toLowerCase() === "find") {
       rl.close();
       return "find";
@@ -1614,11 +1722,15 @@ async function topLevelMenu(): Promise<"find" | "report" | "rename" | "remove"> 
       rl.close();
       return "remove";
     }
-    if (choice === "5" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
+    if (choice === "5" || choice.toLowerCase() === "commit") {
+      rl.close();
+      return "commit";
+    }
+    if (choice === "6" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
       rl.close();
       process.exit(0);
     }
-    console.log(yellow("Enter 1-5."));
+    console.log(yellow("Enter 1-6."));
   }
 }
 
@@ -1628,6 +1740,15 @@ function needsInteractive(opts: Partial<CommandOptions>): boolean {
   }
   if (!opts.command) {
     return true;
+  }
+  if (opts.command === "commit") {
+    return !(
+      opts.commitHash &&
+      opts.branchName &&
+      opts.targetBranch &&
+      opts.commitTitle &&
+      (opts.gitAccessToken || resolveToken())
+    );
   }
   if (!opts.selector) {
     return true;
@@ -1645,6 +1766,75 @@ function needsInteractive(opts: Partial<CommandOptions>): boolean {
   return false;
 }
 
+async function interactiveCommit(
+  rl: readline.Interface,
+  partial: Partial<CommandOptions>
+): Promise<CommandOptions> {
+  console.log(bold("\nInteractive commit\n"));
+  const commitHash =
+    partial.commitHash ||
+    (await promptText(rl, "Change run hash id", { required: true }));
+  const branchName =
+    partial.branchName ||
+    (await promptText(rl, "Feature branch name (--branch-name)", {
+      required: true,
+    }));
+  const targetBranch =
+    partial.targetBranch ||
+    (await promptText(rl, "Target branch for PR base (--target-branch)", {
+      required: true,
+    }));
+  const commitTitle =
+    partial.commitTitle ||
+    (await promptText(rl, "Commit / PR title", { required: true }));
+  const commitBody =
+    partial.commitBody !== undefined
+      ? partial.commitBody
+      : await promptText(rl, "Commit / PR description (optional)", {});
+  let gitAccessToken = partial.gitAccessToken || resolveToken() || "";
+  if (!gitAccessToken) {
+    gitAccessToken = await promptText(
+      rl,
+      "Git access token (or set GIT_ACCESS_TOKEN)",
+      { required: true }
+    );
+  } else {
+    console.log(dim("Using GIT_ACCESS_TOKEN / provided token."));
+  }
+
+  const opts: CommandOptions = {
+    command: "commit",
+    selector: "",
+    inputs: [],
+    outputs: [],
+    roots: [],
+    commitHash,
+    branchName,
+    targetBranch,
+    commitTitle,
+    commitBody,
+    gitAccessToken,
+    commitDryRun: partial.commitDryRun,
+    interactive: true,
+    log: partial.log,
+    noLog: partial.noLog,
+  };
+
+  console.log();
+  console.log(bold("About to run commit:"));
+  console.log(`  hash:           ${opts.commitHash}`);
+  console.log(`  branch-name:    ${opts.branchName}`);
+  console.log(`  target-branch:  ${opts.targetBranch}`);
+  console.log(`  title:          ${opts.commitTitle}`);
+  console.log(`  body:           ${opts.commitBody || "(none)"}`);
+  console.log();
+  if (!(await promptYesNo(rl, "Proceed?", true))) {
+    console.log("Cancelled.");
+    process.exit(130);
+  }
+  return opts;
+}
+
 async function maybePrompt(
   partial: Partial<CommandOptions>
 ): Promise<CommandOptions> {
@@ -1655,7 +1845,7 @@ async function maybePrompt(
   if (!needsInteractive({ ...partial, command })) {
     return {
       command,
-      selector: partial.selector!,
+      selector: partial.selector || "",
       inputs: partial.inputs || [],
       outputs: partial.outputs || [],
       roots: partial.roots || [],
@@ -1666,6 +1856,13 @@ async function maybePrompt(
       interactive: false,
       log: partial.log,
       noLog: partial.noLog,
+      commitHash: partial.commitHash,
+      branchName: partial.branchName,
+      targetBranch: partial.targetBranch,
+      commitTitle: partial.commitTitle,
+      commitBody: partial.commitBody,
+      gitAccessToken: partial.gitAccessToken,
+      commitDryRun: partial.commitDryRun,
     };
   }
 
@@ -1681,7 +1878,10 @@ async function maybePrompt(
     if (command === "rename") {
       return await interactiveRename(rl, base);
     }
-    return await interactiveRemove(rl, base);
+    if (command === "remove") {
+      return await interactiveRemove(rl, base);
+    }
+    return await interactiveCommit(rl, base);
   } finally {
     rl.close();
   }
@@ -1728,7 +1928,79 @@ function normalizeSelector(selector: string): string {
   return s;
 }
 
+async function executeCommit(opts: CommandOptions): Promise<void> {
+  if (!opts.commitHash) {
+    fail("Provide a change run hash (argument or --hash)");
+  }
+  if (!opts.branchName) {
+    fail("Provide --branch-name");
+  }
+  if (!opts.targetBranch) {
+    fail("Provide --target-branch");
+  }
+  if (!opts.commitTitle) {
+    fail("Provide --title (commit / PR title)");
+  }
+
+  console.log(bold("Commit change run"));
+  console.log(`  hash:          ${opts.commitHash}`);
+  console.log(`  branch-name:   ${opts.branchName}`);
+  console.log(`  target-branch: ${opts.targetBranch}`);
+  console.log(`  title:         ${opts.commitTitle}`);
+  console.log();
+
+  const { run, results } = await runCommitCommand({
+    hash: opts.commitHash,
+    branchName: opts.branchName,
+    targetBranch: opts.targetBranch,
+    title: opts.commitTitle,
+    body: opts.commitBody || "",
+    token: opts.gitAccessToken || "",
+    dryRun: Boolean(opts.commitDryRun),
+  });
+
+  console.log(bold(`Results for run ${run.hash}:`));
+  const prLines: string[] = [];
+  for (const result of results) {
+    if (result.error) {
+      console.log(red(`  ✗ ${result.repoName}: ${result.error}`));
+    } else {
+      console.log(green(`  ✓ ${result.repoName}`));
+      if (result.commitSha) {
+        console.log(dim(`      commit: ${result.commitSha}`));
+      }
+      if (result.prUrl) {
+        console.log(`      PR: ${result.prUrl}`);
+        prLines.push(`${result.repoName}: ${result.prUrl}`);
+      }
+    }
+  }
+
+  const logPath = resolveLogPath(opts);
+  writeRunLog(
+    opts,
+    run.roots,
+    [
+      `change run: ${run.hash}`,
+      `branch: ${opts.branchName}`,
+      `target: ${opts.targetBranch}`,
+      `title: ${opts.commitTitle}`,
+      "pull requests:",
+      ...(prLines.length ? prLines.map((l) => `  - ${l}`) : ["  (none)"]),
+      ...results
+        .filter((r) => r.error)
+        .map((r) => `  error ${r.repoName}: ${r.error}`),
+    ],
+    logPath
+  );
+}
+
 async function runCommand(opts: CommandOptions): Promise<void> {
+  if (opts.command === "commit") {
+    await executeCommit(opts);
+    return;
+  }
+
   const roots = normalizeRoots(opts.roots.length ? opts.roots : null);
   const selector = normalizeSelector(opts.selector);
   opts.selector = selector;
@@ -1741,6 +2013,7 @@ async function runCommand(opts: CommandOptions): Promise<void> {
 
   let summaryRepos: string[] = [];
   let summaryFiles: string[] = [];
+  let runHash: string | undefined;
 
   if (opts.command === "rename") {
     const renameMap = parseRenameMap(opts.rename);
@@ -1761,9 +2034,18 @@ async function runCommand(opts: CommandOptions): Promise<void> {
           .join(", ")
     );
     console.log(bold(`Selector: <${selector}>\n`));
-    const result = applyPlans(plans, Boolean(opts.apply));
+    const runMeta = {
+      command: "rename" as const,
+      selector,
+      roots: roots.map(String),
+      inputs: keys,
+      outputs: keys,
+      renameMap,
+    };
+    const result = applyPlans(plans, Boolean(opts.apply), runMeta);
     summaryRepos = result.repos;
     summaryFiles = result.files;
+    runHash = result.runHash;
 
     const logPath = resolveLogPath(opts);
     writeRunLog(
@@ -1772,19 +2054,20 @@ async function runCommand(opts: CommandOptions): Promise<void> {
       [
         `repos affected: ${summaryRepos.join(", ") || "(none)"}`,
         `files affected: ${summaryFiles.length}`,
+        ...(runHash ? [`change run hash: ${runHash}`] : []),
         ...summaryFiles.map((f) => `  - ${f}`),
       ],
       logPath
     );
 
-    await offerApplyAfterDryRun(opts, async (apply) => {
-      const again = { ...opts, apply, interactive: false };
-      // Avoid double-logging noise: temporarily disable auto header reprint by re-running core only
+    await offerApplyAfterDryRun(opts, async () => {
       const plans2 = planRenames(usages, renameMap);
-      console.log(bold("Rename plan: ") + keys.map((k) => `${k} → ${renameMap[k]}`).join(", "));
+      console.log(
+        bold("Rename plan: ") +
+          keys.map((k) => `${k} → ${renameMap[k]}`).join(", ")
+      );
       console.log(bold(`Selector: <${selector}>\n`));
-      applyPlans(plans2, true);
-      void again;
+      applyPlans(plans2, true, runMeta);
     });
     return;
   }
@@ -1829,14 +2112,22 @@ async function runCommand(opts: CommandOptions): Promise<void> {
     }
     console.log(bold("Remove plan: ") + targets.join("; "));
     console.log(bold(`Selector: <${selector}>\n`));
-    const result = applyPlans(plans, Boolean(opts.apply));
+    const runMeta = {
+      command: "remove" as const,
+      selector,
+      roots: roots.map(String),
+      inputs: inputNames,
+      outputs: outputNames,
+    };
+    const result = applyPlans(plans, Boolean(opts.apply), runMeta);
     summaryRepos = result.repos;
     summaryFiles = result.files;
+    runHash = result.runHash;
 
     await offerApplyAfterDryRun(opts, async () => {
       console.log(bold("Remove plan: ") + targets.join("; "));
       console.log(bold(`Selector: <${selector}>\n`));
-      applyPlans(plans, true);
+      applyPlans(plans, true, runMeta);
     });
   }
 
@@ -1847,6 +2138,7 @@ async function runCommand(opts: CommandOptions): Promise<void> {
     [
       `repos affected: ${summaryRepos.join(", ") || "(none)"}`,
       `files affected: ${summaryFiles.length}`,
+      ...(runHash ? [`change run hash: ${runHash}`] : []),
       ...summaryFiles.map((f) => `  - ${f}`),
     ],
     logPath
@@ -1894,7 +2186,7 @@ function buildProgram(): {
     });
 
   const wire = (
-    name: CommandOptions["command"],
+    name: Exclude<CommandOptions["command"], "commit">,
     configure: (c: Command) => Command
   ): void => {
     const c = configure(
@@ -1970,6 +2262,55 @@ function buildProgram(): {
       .option("--apply", "Write changes to disk (default is dry-run)")
   );
 
+  const commitCmd = addSharedOptions(
+    program
+      .command("commit")
+      .description(
+        "Commit a recorded rename/remove change run (tool hunks only) and open PRs"
+      )
+      .argument("[hash]", "Change run hash id from a prior --apply")
+      .option("--hash <id>", "Change run hash id (alternative to argument)")
+      .option("--branch-name <name>", "Feature branch to create")
+      .option("--target-branch <name>", "Base branch to branch from and PR into")
+      .option("--title <text>", "Commit and pull-request title")
+      .option("--body <text>", "Commit and pull-request description")
+      .option(
+        "--git-access-token <token>",
+        "Git host token (else GIT_ACCESS_TOKEN env)"
+      )
+      .option("--dry-run", "Prepare locally but skip commit/push/PR", false)
+  );
+  commitCmd.action((hashArg: string | undefined, options: Record<string, unknown>) => {
+    partial = {
+      command: "commit",
+      selector: "",
+      inputs: [],
+      outputs: [],
+      roots: [],
+      commitHash:
+        (hashArg as string) ||
+        (options.hash as string) ||
+        undefined,
+      branchName: (options.branchName as string) || undefined,
+      targetBranch: (options.targetBranch as string) || undefined,
+      commitTitle: (options.title as string) || undefined,
+      commitBody: (options.body as string) || undefined,
+      gitAccessToken: (options.gitAccessToken as string) || undefined,
+      commitDryRun: Boolean(options.dryRun),
+      interactive: Boolean(options.interactive),
+      log:
+        typeof options.log === "string"
+          ? options.log
+          : typeof program.opts().log === "string"
+            ? (program.opts().log as string)
+            : undefined,
+      noLog:
+        options.log === false ||
+        program.opts().log === false ||
+        process.argv.includes("--no-log"),
+    };
+  });
+
   return {
     program,
     getPartial: () => partial,
@@ -1995,7 +2336,8 @@ async function main(): Promise<void> {
   let partial = getPartial();
 
   // If user ran only `find` / `rename` etc., commander still fires action with empty opts.
-  if (!partial.command && ["find", "report", "rename", "remove"].includes(argv[0])) {
+  const commands = ["find", "report", "rename", "remove", "commit"];
+  if (!partial.command && commands.includes(argv[0])) {
     partial = { ...partial, command: argv[0] as CommandOptions["command"] };
   }
 
