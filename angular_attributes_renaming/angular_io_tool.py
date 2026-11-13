@@ -573,6 +573,13 @@ def collect_usages(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ChangeDetail:
+    line: int
+    column: int
+    message: str
+
+
 @dataclass
 class FileChangePlan:
     file_path: Path
@@ -580,7 +587,7 @@ class FileChangePlan:
     original: str
     updated: str
     change_count: int
-    details: list[str]
+    details: list[ChangeDetail]
 
 
 def _replace_name_in_attr(attr_text: str, old_names: Sequence[str], new_name: str) -> str:
@@ -660,9 +667,12 @@ def plan_renames(
                 )
                 if new_attr == binding.attr_text:
                     continue
-                detail = (
-                    f"L{binding.line}: {binding.kind} "
-                    f"{binding.matched_name} → {new_template_name}"
+                detail = ChangeDetail(
+                    line=binding.line,
+                    column=binding.column,
+                    message=(
+                        f"{binding.kind} {binding.matched_name} → {new_template_name}"
+                    ),
                 )
                 edits.append((binding.start, binding.end, new_attr, detail))
 
@@ -672,7 +682,7 @@ def plan_renames(
         uniq_edits = {(s, e): (s, e, repl, detail) for s, e, repl, detail in edits}
         ordered = sorted(uniq_edits.values(), key=lambda item: item[0], reverse=True)
         updated = original
-        details: list[str] = []
+        details: list[ChangeDetail] = []
         for start, end, repl, detail in ordered:
             updated = updated[:start] + repl + updated[end:]
             details.append(detail)
@@ -703,19 +713,23 @@ def plan_removals(
     plans: list[FileChangePlan] = []
     for file_path, file_usages in sorted(by_file.items(), key=lambda item: str(item[0]).lower()):
         original = file_path.read_text(encoding="utf-8")
-        removals: list[tuple[int, int, str]] = []
+        removals: list[tuple[int, int, ChangeDetail]] = []
         for usage in file_usages:
             for binding in usage.bindings:
                 if binding.property_name not in wanted:
                     continue
-                detail = f"L{binding.line}: remove {binding.kind} {binding.matched_name}"
+                detail = ChangeDetail(
+                    line=binding.line,
+                    column=binding.column,
+                    message=f"remove {binding.kind} {binding.matched_name}",
+                )
                 removals.append((binding.start, binding.end, detail))
         if not removals:
             continue
         uniq = {(s, e): (s, e, detail) for s, e, detail in removals}
         ordered = sorted(uniq.values(), key=lambda item: item[0], reverse=True)
         updated = original
-        details: list[str] = []
+        details: list[ChangeDetail] = []
         for start, end, detail in ordered:
             updated, _, _ = _collapse_attr_whitespace(updated, start, end)
             details.append(detail)
@@ -766,7 +780,9 @@ def apply_plans(plans: Sequence[FileChangePlan], apply: bool) -> None:
         marker = green("updated") if apply else dim("would update")
         print(f"  [{marker}] {plan.file_path}  ({plan.change_count})")
         for detail in plan.details:
-            print(dim(f"      - {detail}"))
+            # Keep path:line:col free of ANSI so Ctrl+Click works in Cursor/VS Code.
+            link = format_clickable_path(plan.file_path, detail.line, detail.column)
+            print(f"      - {link}  {dim(detail.message)}")
 
     if apply:
         for plan in plans:

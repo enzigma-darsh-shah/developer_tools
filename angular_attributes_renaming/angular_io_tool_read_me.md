@@ -284,7 +284,8 @@ python .\angular_io_tool.py rename `
 - Rename plan (`old → new`)
 - Whether it is a dry run or applying
 - **Repositories affected** (name, file count, change count)
-- **Files** with absolute paths and per-line change details
+- **Files** with absolute paths and per-change details
+- Each change line uses a Ctrl+Clickable `file:line:column` link (same as `find`)
 - Reminder to review in GitHub Desktop / `git diff` before committing
 
 ---
@@ -358,7 +359,7 @@ python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $
 
 ## Output & review tips
 
-### Clickable paths (`find` / `report` summary)
+### Clickable paths (`find` / `report` summary / `rename` / `remove`)
 
 Paths look like:
 
@@ -366,7 +367,8 @@ Paths look like:
 D:\orektic\products\my-app\src\app\header\header.component.html:18:3
 ```
 
-Ctrl+Click in the Cursor/VS Code terminal to jump to that location.
+Ctrl+Click in the Cursor/VS Code terminal to jump to that location.  
+`rename` and `remove` print the same `file:line:column` form on each change detail line.
 
 ### Repository labels (`rename` / `remove`)
 
