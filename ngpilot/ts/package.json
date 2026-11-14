@@ -1,7 +1,6 @@
 {
   "name": "@orektic/ngpilot",
   "version": "1.0.0",
-  "private": true,
   "description": "A multi-repository Angular code discovery, refactoring and automation toolkit.",
   "bin": {
     "ngpilot": "./dist/angular_io_tool.js"
@@ -18,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/enzigma-darsh-shah/developer_tools.git"
   },
   "engines": {
     "node": ">=16"
