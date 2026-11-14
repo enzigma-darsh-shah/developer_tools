@@ -1,17 +1,24 @@
 {
-  "name": "angular-io-tool",
+  "name": "@orektic/ngpilot",
   "version": "1.0.0",
   "private": true,
-  "description": "Find, rename, or remove Angular component input/output bindings in HTML templates",
+  "description": "A multi-repository Angular code discovery, refactoring and automation toolkit.",
   "bin": {
-    "angular-io-tool": "./dist/angular_io_tool.js"
+    "ngpilot": "./dist/angular_io_tool.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "npm run build && node dist/angular_io_tool.js",
-    "angular-io-tool": "node dist/angular_io_tool.js",
+    "ngpilot": "node dist/angular_io_tool.js",
     "test": "npm run build && node scripts/test-local-commit.js",
     "test:commit": "npm run test"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
   },
   "engines": {
     "node": ">=16"

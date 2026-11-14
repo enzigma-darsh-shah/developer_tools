@@ -1,2 +1,9 @@
 __pycache__/
 logs/
+logs/
+logs/runs/
+__pycache__/
+_parity_*.txt
+ts/node_modules/
+ts/dist/
+package-lock.json
