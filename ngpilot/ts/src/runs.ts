@@ -1,6 +1,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { defaultRunsDir, ensureDir, resolveRunsDir } from "./paths";
 
 export interface RunFileChange {
   absolutePath: string;
@@ -41,16 +42,30 @@ export interface ChangeRun {
   };
 }
 
-const TOOL_ROOT = path.resolve(__dirname, "..", "..");
-export const RUNS_DIR = path.join(TOOL_ROOT, "logs", "runs");
-export const RUNS_INDEX = path.join(RUNS_DIR, "index.json");
+let runsDirOverride: string | null = null;
+
+/** Configure the change-runs directory for this process (from CLI/env/config). */
+export function setRunsDir(dir: string): void {
+  runsDirOverride = path.resolve(dir);
+}
+
+export function getRunsDir(): string {
+  if (runsDirOverride) {
+    return runsDirOverride;
+  }
+  return resolveRunsDir().dir || defaultRunsDir();
+}
+
+export function getRunsIndexPath(): string {
+  return path.join(getRunsDir(), "index.json");
+}
 
 export function ensureRunsDir(): void {
-  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  ensureDir(getRunsDir());
 }
 
 function runPath(hash: string): string {
-  return path.join(RUNS_DIR, `${hash}.json`);
+  return path.join(getRunsDir(), `${hash}.json`);
 }
 
 export function generateRunHash(payload: Omit<ChangeRun, "hash">): string {
@@ -66,11 +81,16 @@ export function saveChangeRun(run: ChangeRun): string {
   const file = runPath(run.hash);
   fs.writeFileSync(file, JSON.stringify(run, null, 2), "utf8");
 
-  let index: Array<{ hash: string; createdAt: string; command: string; selector: string }> =
-    [];
-  if (fs.existsSync(RUNS_INDEX)) {
+  const indexPath = getRunsIndexPath();
+  let index: Array<{
+    hash: string;
+    createdAt: string;
+    command: string;
+    selector: string;
+  }> = [];
+  if (fs.existsSync(indexPath)) {
     try {
-      index = JSON.parse(fs.readFileSync(RUNS_INDEX, "utf8"));
+      index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
     } catch {
       index = [];
     }
@@ -82,7 +102,7 @@ export function saveChangeRun(run: ChangeRun): string {
     command: run.command,
     selector: run.selector,
   });
-  fs.writeFileSync(RUNS_INDEX, JSON.stringify(index, null, 2), "utf8");
+  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf8");
   return file;
 }
 
@@ -91,14 +111,14 @@ export function loadChangeRun(hash: string): ChangeRun {
   if (fs.existsSync(exact)) {
     return JSON.parse(fs.readFileSync(exact, "utf8")) as ChangeRun;
   }
-  // Allow unique prefix match.
   ensureRunsDir();
+  const dir = getRunsDir();
   const matches = fs
-    .readdirSync(RUNS_DIR)
+    .readdirSync(dir)
     .filter((name) => name.startsWith(hash) && name.endsWith(".json"));
   if (matches.length === 1) {
     return JSON.parse(
-      fs.readFileSync(path.join(RUNS_DIR, matches[0]), "utf8")
+      fs.readFileSync(path.join(dir, matches[0]), "utf8")
     ) as ChangeRun;
   }
   if (matches.length > 1) {
@@ -108,7 +128,7 @@ export function loadChangeRun(hash: string): ChangeRun {
         .join(", ")}`
     );
   }
-  throw new Error(`No change run found for hash '${hash}'. Look in ${RUNS_DIR}`);
+  throw new Error(`No change run found for hash '${hash}'. Look in ${dir}`);
 }
 
 export function updateChangeRun(run: ChangeRun): void {

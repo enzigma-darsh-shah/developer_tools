@@ -9,8 +9,9 @@
     "build": "tsc",
     "start": "npm run build && node dist/angular_io_tool.js",
     "ngpilot": "node dist/angular_io_tool.js",
-    "test": "npm run build && node scripts/test-local-commit.js",
-    "test:commit": "npm run test"
+    "test": "npm run build && node scripts/test-local-commit.js && node scripts/test-impact-and-config.js",
+    "test:commit": "npm run build && node scripts/test-local-commit.js",
+    "test:impact": "npm run build && node scripts/test-impact-and-config.js"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

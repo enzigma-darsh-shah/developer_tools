@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 /**
- * Find, rename, or remove Angular component input/output bindings in HTML templates.
- *
- * TypeScript/Node port of angular_io_tool.py — same CLI behavior, plus interactive
- * prompts and run logging.
+ * ngpilot — find, rename, or remove Angular component input/output bindings
+ * in HTML templates across one or many repositories.
  *
  * Examples:
- *   node dist/angular_io_tool.js find --selector abx-icon --inputs isCustomIcon,isUtilityIcon
- *   node dist/angular_io_tool.js rename --selector abx-icon --rename isCustomIcon=isCustom --apply
- *   node dist/angular_io_tool.js find
+ *   ngpilot find --selector abx-icon --inputs isCustomIcon,isUtilityIcon
+ *   ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom --apply
+ *   ngpilot find
  */
 
 import { spawnSync } from "child_process";
@@ -18,12 +16,32 @@ import * as os from "os";
 import * as path from "path";
 import * as readline from "readline";
 import { runCommitCommand } from "./commit";
+import { resolveGithubUserName } from "./github_user";
 import { gitRemoteUrl, gitTopLevel, pathRelativeToRepo } from "./git/local";
+import {
+  appendImpactRecords,
+  buildImpactRecords,
+  ImpactChangeInput,
+} from "./impact";
+import {
+  ensureDir,
+  persistImpactLog,
+  persistLogsDir,
+  persistRoots,
+  persistRunsDir,
+  resolveImpactLogPaths,
+  resolveLogsDir,
+  resolveRootsInput,
+  resolveRunsDir,
+  USER_CONFIG_HINT,
+} from "./paths";
 import {
   ChangeRun,
   generateRunHash,
   saveChangeRun,
+  setRunsDir,
 } from "./runs";
+import { loadUserConfig } from "./user_config";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +74,8 @@ interface ChangeDetail {
   line: number;
   column: number;
   message: string;
+  attributeAffected: string;
+  notes: string;
 }
 
 interface FileChangePlan {
@@ -80,6 +100,9 @@ interface CommandOptions {
   interactive?: boolean;
   log?: string;
   noLog?: boolean;
+  impactLog?: string;
+  logsDir?: string;
+  runsDir?: string;
   // commit-only
   commitHash?: string;
   branchName?: string;
@@ -115,9 +138,6 @@ const PROJECT_DIR_NAMES = new Set([
   "web",
   "client",
 ]);
-
-const TOOL_ROOT = path.resolve(__dirname, "..", "..");
-const DEFAULT_LOG_DIR = path.join(TOOL_ROOT, "logs");
 
 // ---------------------------------------------------------------------------
 // Logging / console tee
@@ -216,7 +236,9 @@ function defaultLogPath(): string {
     .replace(/[:.]/g, "-")
     .replace("T", "_")
     .slice(0, 19);
-  return path.join(DEFAULT_LOG_DIR, `run-${stamp}.log`);
+  const logsDir = resolveLogsDir().dir;
+  ensureDir(logsDir);
+  return path.join(logsDir, `run-${stamp}.log`);
 }
 
 function resolveLogPath(opts: CommandOptions): string | null {
@@ -935,6 +957,8 @@ function planRenames(
             line: binding.line,
             column: binding.column,
             message: `${binding.kind} ${binding.matchedName} → ${newTemplateName}`,
+            attributeAffected: binding.propertyName,
+            notes: `Renamed ${binding.propertyName} to ${newCanonical}`,
           },
         });
       }
@@ -1005,6 +1029,8 @@ function planRemovals(
             line: binding.line,
             column: binding.column,
             message: `remove ${binding.kind} ${binding.matchedName}`,
+            attributeAffected: binding.propertyName,
+            notes: `Removed ${binding.propertyName}`,
           },
         });
       }
@@ -1105,13 +1131,73 @@ function recordAppliedRun(
   console.log(dim(`  Saved to ${file}`));
   console.log(
     dim(
-      `  Commit locally later with: node dist/angular_io_tool.js commit ${hash} --branch-name <name> --target-branch <base> --title "<msg>"`
+      `  Commit locally later with: ngpilot commit ${hash} --branch-name <name> --target-branch <base> --title "<msg>"`
     )
   );
   return hash;
 }
 
-function applyPlans(
+async function writeImpactLogForPlans(
+  plans: FileChangePlan[],
+  runMeta: {
+    command: "rename" | "remove";
+    selector: string;
+    impactLog?: string;
+    interactive?: boolean;
+  }
+): Promise<void> {
+  const changes: ImpactChangeInput[] = [];
+  for (const plan of plans) {
+    for (const detail of plan.details) {
+      changes.push({
+        filePath: plan.filePath,
+        repo: plan.repo,
+        line: detail.line,
+        attributeAffected: detail.attributeAffected,
+        notes: detail.notes,
+      });
+    }
+  }
+  if (!changes.length) {
+    return;
+  }
+
+  const githubUserName = await resolveGithubUserName({
+    prompt:
+      runMeta.interactive && process.stdin.isTTY
+        ? async () => {
+            const rl = createRl();
+            try {
+              return await promptText(
+                rl,
+                "GitHub username (saved to ~/.ngpilot/config.json)",
+                { required: false }
+              );
+            } finally {
+              rl.close();
+            }
+          }
+        : undefined,
+  });
+
+  const records = buildImpactRecords({
+    githubUserName,
+    selector: runMeta.selector,
+    operation: runMeta.command,
+    changes,
+  });
+  const written = appendImpactRecords(records, runMeta.impactLog);
+  console.log();
+  console.log(
+    green(
+      `Impact log: wrote ${written.count} record(s)`
+    )
+  );
+  console.log(dim(`  JSON: ${written.jsonPath}`));
+  console.log(dim(`  CSV:  ${written.csvPath}`));
+}
+
+async function applyPlans(
   plans: FileChangePlan[],
   apply: boolean,
   runMeta?: {
@@ -1121,8 +1207,10 @@ function applyPlans(
     inputs: string[];
     outputs: string[];
     renameMap?: Record<string, string>;
+    impactLog?: string;
+    interactive?: boolean;
   }
-): { repos: string[]; files: string[]; runHash?: string } {
+): Promise<{ repos: string[]; files: string[]; runHash?: string }> {
   if (plans.length === 0) {
     console.log(yellow("No matching bindings found — nothing to change."));
     return { repos: [], files: [] };
@@ -1180,6 +1268,7 @@ function applyPlans(
     );
     if (runMeta) {
       runHash = recordAppliedRun(plans, runMeta) || undefined;
+      await writeImpactLogForPlans(plans, runMeta);
     }
   } else {
     console.log();
@@ -1450,15 +1539,105 @@ async function promptRoots(rl: readline.Interface, existing: string[]): Promise<
   if (existing.length) {
     return existing;
   }
+  const resolved = resolveRootsInput(null);
+  if (resolved.roots && resolved.roots.length) {
+    console.log(
+      dim(
+        `Using repository roots from ${resolved.source}` +
+          (resolved.source === "env" ? " (NGPILOT_ROOTS)" : "") +
+          `: ${resolved.roots.join("; ")}`
+      )
+    );
+    return resolved.roots;
+  }
   const raw = await promptText(
     rl,
     "Roots (paths separated by ; — Enter = current directory)",
     { defaultValue: process.cwd() }
   );
   if (!raw || raw === process.cwd()) {
+    persistRoots([]);
     return [];
   }
-  return raw.split(/[;]+/).map((s) => s.trim()).filter(Boolean);
+  const roots = raw.split(/[;]+/).map((s) => s.trim()).filter(Boolean);
+  persistRoots(roots);
+  return roots;
+}
+
+function hasEnvOrConfigLogsDir(): boolean {
+  return Boolean(process.env.NGPILOT_LOGS?.trim() || loadUserConfig().logsDir);
+}
+
+function hasEnvOrConfigRunsDir(): boolean {
+  return Boolean(process.env.NGPILOT_RUNS?.trim() || loadUserConfig().runsDir);
+}
+
+function hasEnvOrConfigImpactLog(): boolean {
+  return Boolean(
+    process.env.NGPILOT_IMPACT_LOG?.trim() || loadUserConfig().impactLog
+  );
+}
+
+/**
+ * Prompt once for logs-dir / runs-dir / impact-log when not set via CLI/env/config.
+ * Persists answers to ~/.ngpilot/config.json.
+ */
+async function ensurePersistentPaths(
+  rl: readline.Interface,
+  partial: Partial<CommandOptions>,
+  options: { needImpact: boolean }
+): Promise<{
+  logsDir?: string;
+  runsDir?: string;
+  impactLog?: string;
+}> {
+  let logsDir = partial.logsDir;
+  let runsDir = partial.runsDir;
+  let impactLog = partial.impactLog;
+
+  if (logsDir) {
+    persistLogsDir(logsDir);
+  } else if (!hasEnvOrConfigLogsDir()) {
+    const fallback = resolveLogsDir().dir;
+    const raw = await promptText(
+      rl,
+      `Logs directory (Enter = ${fallback})`,
+      { defaultValue: fallback }
+    );
+    logsDir = path.resolve(raw || fallback);
+    persistLogsDir(logsDir);
+  }
+
+  const logsResolved = resolveLogsDir(logsDir);
+  if (runsDir) {
+    persistRunsDir(runsDir);
+  } else if (!hasEnvOrConfigRunsDir()) {
+    const fallback = resolveRunsDir(null, logsResolved).dir;
+    const raw = await promptText(
+      rl,
+      `Change-runs directory (Enter = ${fallback})`,
+      { defaultValue: fallback }
+    );
+    runsDir = path.resolve(raw || fallback);
+    persistRunsDir(runsDir);
+  }
+
+  if (options.needImpact) {
+    if (impactLog) {
+      persistImpactLog(impactLog);
+    } else if (!hasEnvOrConfigImpactLog()) {
+      const fallback = resolveImpactLogPaths(null).configuredPath;
+      const raw = await promptText(
+        rl,
+        `Impact log path (.csv or .json; sibling pair kept) (Enter = ${fallback})`,
+        { defaultValue: fallback }
+      );
+      impactLog = path.resolve(raw || fallback);
+      persistImpactLog(impactLog);
+    }
+  }
+
+  return { logsDir, runsDir, impactLog };
 }
 
 async function confirmOptions(
@@ -1485,6 +1664,15 @@ async function confirmOptions(
   }
   if (opts.command === "rename" || opts.command === "remove") {
     console.log(`  apply:    ${opts.apply ? "yes" : "no (dry-run)"}`);
+    if (opts.impactLog) {
+      console.log(`  impact:   ${opts.impactLog}`);
+    }
+  }
+  if (opts.logsDir) {
+    console.log(`  logs-dir: ${opts.logsDir}`);
+  }
+  if (opts.runsDir) {
+    console.log(`  runs-dir: ${opts.runsDir}`);
   }
   console.log(
     `  roots:    ${opts.roots.length ? opts.roots.join("; ") : "(cwd)"}`
@@ -1512,6 +1700,7 @@ async function interactiveFind(
       ? partial.outputs.join(",")
       : await promptText(rl, "Outputs (comma-separated)", {});
   const roots = await promptRoots(rl, partial.roots || []);
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: false });
   const opts: CommandOptions = {
     command: "find",
     selector,
@@ -1521,6 +1710,8 @@ async function interactiveFind(
     interactive: true,
     log: partial.log,
     noLog: partial.noLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
   };
   if (!(await confirmOptions(rl, opts))) {
     console.log("Cancelled.");
@@ -1558,6 +1749,7 @@ async function interactiveReport(
     partial.output ||
     (await promptText(rl, "Output file path (Enter = stdout)", {}));
   const roots = await promptRoots(rl, partial.roots || []);
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: false });
   const opts: CommandOptions = {
     command: "report",
     selector,
@@ -1569,6 +1761,8 @@ async function interactiveReport(
     interactive: true,
     log: partial.log,
     noLog: partial.noLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
   };
   if (!(await confirmOptions(rl, opts))) {
     console.log("Cancelled.");
@@ -1618,6 +1812,7 @@ async function interactiveRename(
       false
     );
   }
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: true });
   const opts: CommandOptions = {
     command: "rename",
     selector,
@@ -1629,6 +1824,9 @@ async function interactiveRename(
     interactive: true,
     log: partial.log,
     noLog: partial.noLog,
+    impactLog: paths.impactLog || partial.impactLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
   };
   if (!(await confirmOptions(rl, opts))) {
     console.log("Cancelled.");
@@ -1674,6 +1872,7 @@ async function interactiveRemove(
       false
     );
   }
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: true });
   const opts: CommandOptions = {
     command: "remove",
     selector,
@@ -1684,6 +1883,9 @@ async function interactiveRemove(
     interactive: true,
     log: partial.log,
     noLog: partial.noLog,
+    impactLog: paths.impactLog || partial.impactLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
   };
   if (!(await confirmOptions(rl, opts))) {
     console.log("Cancelled.");
@@ -1696,7 +1898,7 @@ async function topLevelMenu(): Promise<
   "find" | "report" | "rename" | "remove" | "commit"
 > {
   const rl = createRl();
-  console.log(bold("Angular IO Tool"));
+  console.log(bold("ngpilot"));
   console.log("  1) find    - locate input/output usages");
   console.log("  2) report  - write markdown/json report");
   console.log("  3) rename  - rename bindings (dry-run by default)");
@@ -1835,6 +2037,8 @@ async function maybePrompt(
       selector: partial.selector || "",
       inputs: partial.inputs || [],
       outputs: partial.outputs || [],
+      // Keep CLI roots only; env/config roots are resolved in runCommand
+      // so environment overrides are not written back to user config.
       roots: partial.roots || [],
       rename: partial.rename,
       apply: partial.apply,
@@ -1843,6 +2047,9 @@ async function maybePrompt(
       interactive: false,
       log: partial.log,
       noLog: partial.noLog,
+      impactLog: partial.impactLog,
+      logsDir: partial.logsDir,
+      runsDir: partial.runsDir,
       commitHash: partial.commitHash,
       branchName: partial.branchName,
       targetBranch: partial.targetBranch,
@@ -1959,6 +2166,11 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
         `${result.repoName}\t${result.branchName}\t${result.commitSha || ""}`
       );
     }
+    if (result.warnings?.length) {
+      for (const warning of result.warnings) {
+        console.log(yellow(`      warning: ${warning}`));
+      }
+    }
   }
 
   if (successLines.length) {
@@ -1995,13 +2207,56 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
   );
 }
 
+function applyRuntimePaths(opts: CommandOptions): void {
+  if (opts.logsDir) {
+    persistLogsDir(opts.logsDir);
+  }
+  if (opts.runsDir) {
+    persistRunsDir(opts.runsDir);
+  }
+  if (opts.impactLog) {
+    persistImpactLog(opts.impactLog);
+  }
+  const logs = resolveLogsDir(opts.logsDir);
+  const runs = resolveRunsDir(opts.runsDir, logs);
+  setRunsDir(runs.dir);
+  ensureDir(logs.dir);
+  ensureDir(runs.dir);
+}
+
+function argvHasFlag(...flags: string[]): boolean {
+  for (const arg of process.argv) {
+    for (const flag of flags) {
+      if (arg === flag || arg.startsWith(flag + "=")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function runCommand(opts: CommandOptions): Promise<void> {
+  applyRuntimePaths(opts);
+
   if (opts.command === "commit") {
     await executeCommit(opts);
     return;
   }
 
-  const roots = normalizeRoots(opts.roots.length ? opts.roots : null);
+  const rootsFromCli = argvHasFlag("--roots", "--root");
+  let rootsInput: string[] | null | undefined;
+  if (rootsFromCli) {
+    if (opts.roots.length) {
+      persistRoots(opts.roots);
+    }
+    rootsInput = opts.roots.length ? opts.roots : null;
+  } else if (opts.interactive) {
+    // Interactive promptRoots already persisted when appropriate.
+    rootsInput = opts.roots.length ? opts.roots : resolveRootsInput(null).roots;
+  } else {
+    rootsInput = resolveRootsInput(null).roots ?? null;
+  }
+  const roots = normalizeRoots(rootsInput ?? null);
   const selector = normalizeSelector(opts.selector);
   opts.selector = selector;
 
@@ -2041,8 +2296,10 @@ async function runCommand(opts: CommandOptions): Promise<void> {
       inputs: keys,
       outputs: keys,
       renameMap,
+      impactLog: opts.impactLog,
+      interactive: Boolean(opts.interactive),
     };
-    const result = applyPlans(plans, Boolean(opts.apply), runMeta);
+    const result = await applyPlans(plans, Boolean(opts.apply), runMeta);
     summaryRepos = result.repos;
     summaryFiles = result.files;
     runHash = result.runHash;
@@ -2067,7 +2324,7 @@ async function runCommand(opts: CommandOptions): Promise<void> {
           keys.map((k) => `${k} → ${renameMap[k]}`).join(", ")
       );
       console.log(bold(`Selector: <${selector}>\n`));
-      applyPlans(plans2, true, runMeta);
+      await applyPlans(plans2, true, runMeta);
     });
     return;
   }
@@ -2118,8 +2375,10 @@ async function runCommand(opts: CommandOptions): Promise<void> {
       roots: roots.map(String),
       inputs: inputNames,
       outputs: outputNames,
+      impactLog: opts.impactLog,
+      interactive: Boolean(opts.interactive),
     };
-    const result = applyPlans(plans, Boolean(opts.apply), runMeta);
+    const result = await applyPlans(plans, Boolean(opts.apply), runMeta);
     summaryRepos = result.repos;
     summaryFiles = result.files;
     runHash = result.runHash;
@@ -2127,7 +2386,7 @@ async function runCommand(opts: CommandOptions): Promise<void> {
     await offerApplyAfterDryRun(opts, async () => {
       console.log(bold("Remove plan: ") + targets.join("; "));
       console.log(bold(`Selector: <${selector}>\n`));
-      applyPlans(plans, true, runMeta);
+      await applyPlans(plans, true, runMeta);
     });
   }
 
@@ -2153,12 +2412,40 @@ function collect(value: string, previous: string[]): string[] {
   return previous.concat([value]);
 }
 
+const CONFIG_HELP = `
+Configuration priority (highest first): CLI flag → environment variable →
+saved config (${USER_CONFIG_HINT}) → interactive prompt → built-in defaults.
+
+Environment variables:
+  NGPILOT_ROOTS         ;-separated repository roots
+  NGPILOT_LOGS          directory for run-*.log transcripts
+  NGPILOT_RUNS          directory for change-run JSON files
+  NGPILOT_IMPACT_LOG    path to impact .csv/.json (sibling pair is maintained)
+  NGPILOT_GITHUB_USER   GitHub username for impact records (fallback: GITHUB_USER)
+
+PowerShell examples:
+  $env:NGPILOT_ROOTS = "D:\\angular-repos;D:\\other-repos"
+  $env:NGPILOT_IMPACT_LOG = "D:\\folder\\nested\\their_file_name.csv"
+  [System.Environment]::SetEnvironmentVariable("NGPILOT_ROOTS", "D:\\angular-repos", "User")
+`.trim();
+
 function addSharedOptions(cmd: Command): Command {
   return cmd
-    .option("--roots <paths...>", "Parent directories or repo paths to search")
+    .option(
+      "--roots <paths...>",
+      "Parent directories or repo paths to search (overrides NGPILOT_ROOTS; saved to user config)"
+    )
     .option("--root <path>", "Additional search root (repeatable)", collect, [])
+    .option(
+      "--logs-dir <path>",
+      "Directory for run-*.log transcripts (overrides NGPILOT_LOGS; saved to user config)"
+    )
+    .option(
+      "--runs-dir <path>",
+      "Directory for change-run JSON files (overrides NGPILOT_RUNS; saved to user config)"
+    )
     .option("-i, --interactive", "Force interactive prompts", false)
-    .option("--log <path>", "Write run log to this file")
+    .option("--log <path>", "Write this run's transcript to this file")
     .option("--no-log", "Disable run logging");
 }
 
@@ -2170,13 +2457,20 @@ function buildProgram(): {
 
   const program = new Command();
   program
-    .name("angular-io-tool")
+    .name("ngpilot")
     .description(
-      "Find, rename, or remove Angular component input/output bindings across HTML templates using ripgrep."
+      [
+        "Multi-repo Angular template tooling: find, report, rename, or remove",
+        "component input/output bindings (HTML only), then optionally create",
+        "local commits from a recorded apply run.",
+        "",
+        CONFIG_HELP,
+      ].join("\n")
     )
     .option("-i, --interactive", "Open interactive menu / force prompts", false)
-    .option("--log <path>", "Write run log to this file")
+    .option("--log <path>", "Write this run's transcript to this file")
     .option("--no-log", "Disable run logging")
+    .addHelpText("after", `\n${CONFIG_HELP}\n`)
     .action((options) => {
       partial = {
         interactive: true,
@@ -2223,43 +2517,83 @@ function buildProgram(): {
           options.log === false ||
           program.opts().log === false ||
           process.argv.includes("--no-log"),
+        impactLog:
+          typeof options.impactLog === "string"
+            ? (options.impactLog as string)
+            : undefined,
+        logsDir:
+          typeof options.logsDir === "string"
+            ? (options.logsDir as string)
+            : undefined,
+        runsDir:
+          typeof options.runsDir === "string"
+            ? (options.runsDir as string)
+            : undefined,
       };
     });
   };
 
   wire("find", (c) =>
     c
-      .description("List usages of the component and selected bindings")
+      .description(
+        "List usages of the component and selected bindings. Roots: --roots, NGPILOT_ROOTS, saved config, or cwd."
+      )
       .option("--selector <name>", "Component selector, e.g. abx-icon")
       .option("--inputs <names...>", "Input property names")
       .option("--outputs <names...>", "Output property names")
+      .addHelpText("after", `\n${CONFIG_HELP}\n`)
   );
 
   wire("report", (c) =>
     c
-      .description("Write a Markdown or JSON usage report")
+      .description(
+        "Write a Markdown or JSON usage report. Roots: --roots, NGPILOT_ROOTS, saved config, or cwd."
+      )
       .option("--selector <name>", "Component selector, e.g. abx-icon")
       .option("--inputs <names...>", "Input property names")
       .option("--outputs <names...>", "Output property names")
       .option("--format <fmt>", "Report format: markdown|json", "markdown")
       .option("-o, --output <path>", "Output file path (default: stdout)")
+      .addHelpText("after", `\n${CONFIG_HELP}\n`)
   );
 
   wire("rename", (c) =>
     c
-      .description("Rename input/output bindings in HTML templates")
+      .description(
+        [
+          "Rename input/output bindings in HTML templates (dry-run by default).",
+          "With --apply: writes files, records a change-run hash, and appends",
+          "one impact row per binding change to the JSON+CSV impact log.",
+        ].join(" ")
+      )
       .option("--selector <name>", "Component selector, e.g. abx-icon")
       .option("--rename <pairs...>", "old=new pairs")
       .option("--apply", "Write changes to disk (default is dry-run)")
+      .option(
+        "--impact-log <path>",
+        "Impact log .csv/.json path (sibling pair maintained; overrides NGPILOT_IMPACT_LOG; saved to user config)"
+      )
+      .addHelpText("after", `\n${CONFIG_HELP}\n`)
   );
 
   wire("remove", (c) =>
     c
-      .description("Remove input/output bindings from HTML templates")
+      .description(
+        [
+          "Remove input/output bindings from HTML templates (dry-run by default).",
+          "With --apply: writes files, records a change-run hash, and appends",
+          "one impact row per binding change to the JSON+CSV impact log.",
+        ].join(" ")
+      )
       .option("--selector <name>", "Component selector, e.g. abx-icon")
       .option("--inputs <names...>", "Input property names")
       .option("--outputs <names...>", "Output property names")
       .option("--apply", "Write changes to disk (default is dry-run)")
+      .option(
+        "--impact-log <path>",
+        "Impact log .csv/.json path (sibling pair maintained; overrides NGPILOT_IMPACT_LOG; saved to user config)"
+      )
+      .addHelpText("after", `\n${CONFIG_HELP}\n`)
   );
 
   const commitCmd = addSharedOptions(
@@ -2306,6 +2640,14 @@ function buildProgram(): {
         options.log === false ||
         program.opts().log === false ||
         process.argv.includes("--no-log"),
+      logsDir:
+        typeof options.logsDir === "string"
+          ? (options.logsDir as string)
+          : undefined,
+      runsDir:
+        typeof options.runsDir === "string"
+          ? (options.runsDir as string)
+          : undefined,
     };
   });
 

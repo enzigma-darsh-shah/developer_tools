@@ -1,8 +1,8 @@
-# Angular IO Tool
+# ngpilot
 
-Search, rename, and remove Angular component **input/output bindings** across HTML templates in one or many repositories.
+Multi-repository Angular template tooling: **find**, **report**, **rename**, and **remove** component input/output bindings in HTML, then optionally create **local commits** from a recorded apply run.
 
-The tool uses **ripgrep (`rg`)** for fast HTML search, then parses each matching opening tag so multi-line usages and camelCase / kebab-case bindings are handled correctly.
+The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgrep (`rg`)** for fast HTML search, then parses each matching opening tag so multi-line usages and camelCase / kebab-case bindings are handled correctly.
 
 | Capability | Command | What it does |
 |---|---|---|
@@ -10,160 +10,184 @@ The tool uses **ripgrep (`rg`)** for fast HTML search, then parses each matching
 | Usage report | `report` | Writes a Markdown or JSON report |
 | Rename properties | `rename` | Renames bindings in templates (dry-run by default) |
 | Remove properties | `remove` | Removes bindings from templates (dry-run by default) |
-| Local commit (TS) | `commit` | Creates local commits for a recorded apply-run (tool hunks only; no push/PR) |
+| Local commit | `commit` | Creates local commits for a recorded apply-run (tool hunks only; no push/PR) |
+| Impact tracking | (on `--apply`) | Appends per-binding rows to centralized JSON + CSV logs |
 
 **Scope:** HTML templates only (`.html`). It does **not** edit TypeScript `@Input()` / `@Output()` definitions.
 
 **Matching rule:** only real attribute / binding **names** are matched — not the same text inside quoted values (e.g. `[abcd]="obj.isCustomIcon"` or `*ngIf="... == 'table'"` are ignored when searching for `isCustomIcon` / `table`).
 
----
-
-## Two implementations
-
-| | Python | TypeScript / Node |
-|---|---|---|
-| Path | `angular_io_tool.py` | `ts/` (compiled to `ts/dist/angular_io_tool.js`) |
-| Status | Reference implementation | Port + interactive + logging + local commit |
-| Interactive prompts | No | Yes |
-| Run logging | No | Yes (on by default) |
-| Change-run hash + `commit` | No | Yes (on `--apply`) |
-| Keep until… | Parity baseline | Daily driver once trusted |
-
-Core `find` / `report` / `rename` / `remove` flag behavior matches between both.
+A legacy Python reference (`angular_io_tool.py`) remains in the repo for parity on find/report/rename/remove only. New features (interactive config, impact logs, local commit, env/user config) are **TypeScript / ngpilot only**.
 
 ---
 
 ## Requirements
 
-### Shared
-
 - **ripgrep (`rg`)** on your `PATH`
+- **Node.js 16+** and npm
 
 ```powershell
 rg --version
-```
-
-### Python version
-
-- **Python 3.10+**
-
-```powershell
-python --version
-```
-
-### TypeScript / Node version
-
-- **Node.js 16+**
-- npm (to install dependencies and build once)
-
-```powershell
 node --version
 npm --version
 ```
 
-First-time setup for the TS tool:
+First-time setup:
 
 ```powershell
-cd d:\Tools\angular_attributes_renaming\ts
+cd d:\Tools\ngpilot\ts
 npm install
 npm run build
 ```
 
-Rebuild after pulling changes to `ts/src`:
+Install the CLI locally (optional):
 
 ```powershell
-npm run build
+npm link
+ngpilot --help
+```
+
+Or run without linking:
+
+```powershell
+node .\dist\angular_io_tool.js --help
+npm run ngpilot -- --help
 ```
 
 ---
 
-## How to run
+## Configuration resolution
 
-### Python
+For roots, logs directory, runs directory, impact log path, and GitHub username, ngpilot resolves values in this order (highest first):
 
-```powershell
-cd d:\Tools\angular_attributes_renaming
-python .\angular_io_tool.py -h
-python .\angular_io_tool.py find -h
-python .\angular_io_tool.py rename -h
-python .\angular_io_tool.py remove -h
-python .\angular_io_tool.py report -h
-```
+1. **CLI flag** (also **updates** saved user config)
+2. **Environment variable** (overrides saved config; does **not** rewrite it)
+3. **Saved user config** — `%USERPROFILE%\.ngpilot\config.json`
+4. **Interactive prompt** (only when still unset; answer is saved)
+5. **Built-in defaults** under the installed tool root (`ngpilot/logs/...`)
 
-Full path form:
+### Environment variables
 
-```powershell
-python d:\Tools\angular_attributes_renaming\angular_io_tool.py find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
-```
+| Variable | Purpose | Format / example |
+|---|---|---|
+| `NGPILOT_ROOTS` | Repository search roots | `;`-separated paths |
+| `NGPILOT_LOGS` | Directory for `run-*.log` transcripts | Absolute directory |
+| `NGPILOT_RUNS` | Directory for change-run JSON files | Absolute directory |
+| `NGPILOT_IMPACT_LOG` | Impact log file (JSON+CSV sibling pair) | Absolute file path |
+| `NGPILOT_GITHUB_USER` | GitHub username for impact rows | String |
+| `GITHUB_USER` | Fallback if `NGPILOT_GITHUB_USER` unset | String |
 
-### TypeScript / Node
+If only `NGPILOT_LOGS` is set:
 
-```powershell
-cd d:\Tools\angular_attributes_renaming\ts
-node .\dist\angular_io_tool.js -h
-node .\dist\angular_io_tool.js find -h
-```
+- runs default to `$NGPILOT_LOGS\runs`
+- impact defaults to `$NGPILOT_LOGS\components_impact_area.{json,csv}`
 
-Full path form:
+### Shell examples (PowerShell)
 
-```powershell
-node d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
-```
-
-Optional npm script (from `ts/`):
+Session-only:
 
 ```powershell
-npm run angular-io-tool -- find --selector abx-icon --inputs isCustomIcon --roots D:\angular-repos
+$env:NGPILOT_ROOTS = "D:\angular-repos;D:\other-repos"
+$env:NGPILOT_LOGS = "D:\ngpilot-data\logs"
+$env:NGPILOT_RUNS = "D:\ngpilot-data\logs\runs"
+$env:NGPILOT_IMPACT_LOG = "D:\folder\nested\their_file_name.csv"
+$env:NGPILOT_GITHUB_USER = "your-github-login"
 ```
+
+User-wide (survives new terminals):
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("NGPILOT_ROOTS", "D:\angular-repos", "User")
+[System.Environment]::SetEnvironmentVariable("NGPILOT_IMPACT_LOG", "D:\folder\nested\their_file_name.csv", "User")
+[System.Environment]::SetEnvironmentVariable("NGPILOT_GITHUB_USER", "your-github-login", "User")
+```
+
+Open a **new** terminal after setting User-level variables.
+
+### Saved user config
+
+Path: `%USERPROFILE%\.ngpilot\config.json`
+
+Example:
+
+```json
+{
+  "roots": ["D:\\angular-repos"],
+  "logsDir": "D:\\ngpilot-data\\logs",
+  "runsDir": "D:\\ngpilot-data\\logs\\runs",
+  "impactLog": "D:\\folder\\nested\\their_file_name.csv",
+  "githubUserName": "your-github-login"
+}
+```
+
+Interactive answers are stored here once. Change them later with CLI flags (which update this file) or by editing the JSON.
+
+### Default locations (tool install root)
+
+Relative to the `ngpilot` package root (not your cwd):
+
+| Artifact | Default |
+|---|---|
+| Run transcripts | `logs/run-<timestamp>.log` |
+| Change runs | `logs/runs/<hash>.json` |
+| Impact JSON | `logs/components_impact_area.json` |
+| Impact CSV | `logs/components_impact_area.csv` |
+
+After a successful `--apply`, the tool prints the resolved impact JSON and CSV paths.
 
 ---
 
-## Shared options (Python & TypeScript)
-
-These flags work the same on both implementations.
-
-### `--selector` (required for non-interactive runs)
-
-Component selector **without** angle brackets:
+## CLI help
 
 ```powershell
---selector abx-icon
+ngpilot --help
+ngpilot rename --help
+ngpilot remove --help
+ngpilot find --help
+ngpilot report --help
+ngpilot commit --help
 ```
 
-`<abx-icon>` is also accepted and normalized.
+Main and command help include the configuration priority, environment variables, and PowerShell examples.
 
-### `--roots` / `--root` (optional)
+---
+
+## Shared options
+
+### `--selector`
+
+Component selector **without** angle brackets (`abx-icon`). `<abx-icon>` is accepted and normalized.
+
+### `--roots` / `--root`
 
 | Flag | Meaning |
 |---|---|
-| `--roots PATH [PATH ...]` | One or more parent folders or repo paths |
-| `--root PATH` | Same idea, repeatable (`--root A --root B`) |
-| *(omitted)* | Uses the **current working directory** |
-
-Examples:
+| `--roots PATH [PATH ...]` | One or more parent folders or repo paths (saved to user config) |
+| `--root PATH` | Repeatable extra root |
+| *(omitted)* | `NGPILOT_ROOTS` → saved config → interactive → **cwd** |
 
 ```powershell
-# Search under one parent that contains many Angular repos
 --roots D:\angular-repos
-
-# Multiple explicit roots
 --roots D:\repos\app-a D:\repos\app-b
-
-# Repeatable --root
---root D:\repos\app-a --root D:\repos\app-b
-```
-
-Semicolon-separated paths inside a single argument are also accepted:
-
-```powershell
 --roots "D:\repos\app-a;D:\repos\app-b"
 ```
 
-Skipped folders: `node_modules`, `dist`, `.angular`, `.git`, `coverage`, `tmp`, `out-tsc`, `.idea`, `.vscode`, `__pycache__`.
+When `NGPILOT_ROOTS` (or saved roots) is set, interactive mode does **not** ask for roots again.
+
+### Path / logging options
+
+| Flag | Meaning |
+|---|---|
+| `--logs-dir <path>` | Directory for `run-*.log` (overrides `NGPILOT_LOGS`; saved) |
+| `--runs-dir <path>` | Directory for change-run JSON (overrides `NGPILOT_RUNS`; saved) |
+| `--impact-log <path>` | Impact `.csv` / `.json` / base path (sibling pair; overrides `NGPILOT_IMPACT_LOG`; saved) |
+| `--log <path>` | Write **this run's** transcript to a specific file |
+| `--no-log` | Disable run transcript logging |
+| `-i` / `--interactive` | Force prompts |
+
+**Impact log siblings:** if you pass `D:\folder\nested\their_file_name.csv`, JSON is written to `D:\folder\nested\their_file_name.json` (and the reverse). Missing directories are created.
 
 ### `--inputs` / `--outputs`
-
-Property names to match. Multiple forms:
 
 ```powershell
 --inputs isCustomIcon,isUtilityIcon
@@ -172,11 +196,11 @@ Property names to match. Multiple forms:
 --inputs isCustomIcon --outputs iconClick,iconHover
 ```
 
-Pass the TypeScript-style name (`isCustomIcon`); kebab-case in templates (`is-custom-icon`) is matched automatically.
+Pass the TypeScript-style name (`isCustomIcon`); kebab-case in templates is matched automatically.
 
-### Binding forms recognized in HTML
+### Binding forms recognized
 
-| Kind | Examples matched |
+| Kind | Examples |
 |---|---|
 | Property binding | `[isCustomIcon]="true"` |
 | Attribute binding | `foregroundIcon="star"` |
@@ -184,81 +208,41 @@ Pass the TypeScript-style name (`isCustomIcon`); kebab-case in templates (`is-cu
 | Output binding | `(iconClick)="onClick($event)"` |
 | Kebab-case | `[is-custom-icon]="..."`, `(icon-click)="..."` |
 
-Only tags for the given `--selector` are changed.
-
 ---
 
-## Command: `find`
+## Commands
 
-Lists matching usages. Paths use absolute `file:line:column` so **Ctrl+Click** works in Cursor / VS Code.
-
-### Python
+### `find`
 
 ```powershell
-python .\angular_io_tool.py find `
-  --selector abx-icon `
-  --inputs "[isCustomIcon, isUtilityIcon]" `
-  --outputs iconClick `
-  --roots D:\angular-repos
+ngpilot find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --outputs iconClick --roots D:\angular-repos
+ngpilot find --selector abx-icon
 ```
 
-### TypeScript
+Paths print as absolute `file:line:column` for **Ctrl+Click**.
 
-```powershell
-node .\dist\angular_io_tool.js find `
-  --selector abx-icon `
-  --inputs "[isCustomIcon, isUtilityIcon]" `
-  --outputs iconClick `
-  --roots D:\angular-repos
-```
-
-**Selector only** (every `<abx-icon>` usage):
-
-```powershell
-python .\angular_io_tool.py find --selector abx-icon --roots D:\angular-repos
-node .\dist\angular_io_tool.js find --selector abx-icon --roots D:\angular-repos
-```
-
----
-
-## Command: `report`
+### `report`
 
 | Option | Values | Default |
 |---|---|---|
 | `--format` | `markdown`, `json` | `markdown` |
 | `-o` / `--output` | file path | stdout |
 
-### Python
-
 ```powershell
-python .\angular_io_tool.py report `
-  --selector abx-icon `
-  --inputs isCustomIcon,isUtilityIcon `
-  --format markdown `
-  -o .\abx-icon-report.md `
-  --roots D:\angular-repos
+ngpilot report --selector abx-icon --inputs isCustomIcon --format markdown -o .\abx-icon-report.md --roots D:\angular-repos
 ```
 
-### TypeScript
+### `rename`
+
+Dry-run by default; `--apply` writes files.
 
 ```powershell
-node .\dist\angular_io_tool.js report `
-  --selector abx-icon `
-  --inputs isCustomIcon,isUtilityIcon `
-  --format json `
-  -o .\usage-report.json `
-  --roots D:\angular-repos
+ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos
+ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
+ngpilot rename --selector abx-icon --rename fillColor=foregroundColor --apply --impact-log D:\folder\nested\their_file_name.csv
 ```
 
-When `-o` is used, a human `find`-style summary is also printed in the terminal.
-
----
-
-## Command: `rename`
-
-Renames bindings in HTML. **Dry-run by default**; pass `--apply` to write.
-
-### `--rename` forms
+`--rename` forms:
 
 ```powershell
 --rename isCustomIcon=isCustom
@@ -266,256 +250,160 @@ Renames bindings in HTML. **Dry-run by default**; pass `--apply` to write.
 --rename "[isCustomIcon=isCustom, isUtilityIcon=isUtility]"
 ```
 
-### Python
+### `remove`
+
+Requires `--inputs` and/or `--outputs`. Dry-run by default; `--apply` writes.
 
 ```powershell
-# Dry-run
-python .\angular_io_tool.py rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos
-
-# Apply
-python .\angular_io_tool.py rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
+ngpilot remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos
+ngpilot remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos --apply
 ```
 
-### TypeScript
+### `commit` (local only)
+
+Creates local feature-branch commits from a recorded `--apply` change-run hash. **No push, no PR, no token.**
 
 ```powershell
-node .\dist\angular_io_tool.js rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos
-node .\dist\angular_io_tool.js rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
+ngpilot commit
+ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon" --body "..."
 ```
 
-Each change line prints a Ctrl+Clickable `file:line:column` link. Review in GitHub Desktop, then commit manually.
+Per repo: stash → resolve target → create/reset feature branch from target (existing local branch is hard-reset to target) → apply tool hunks only → local commit → restore previous branch/stash → print repo / branch / sha.
 
 ---
 
-## Command: `remove`
-
-Removes the given input/output bindings. Requires `--inputs` and/or `--outputs`. Dry-run by default; `--apply` writes.
-
-### Python
+## Interactive mode
 
 ```powershell
-python .\angular_io_tool.py remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos
-python .\angular_io_tool.py remove --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots D:\angular-repos --apply
+ngpilot
+ngpilot -i
+ngpilot rename -i
 ```
 
-### TypeScript
-
-```powershell
-node .\dist\angular_io_tool.js remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos
-node .\dist\angular_io_tool.js remove --selector abx-icon --outputs iconClick --roots D:\angular-repos --apply
-```
-
----
-
-## TypeScript-only: interactive prompts
-
-You do **not** need to remember every flag. The TS tool prompts when required values are missing.
-
-### Ways to start interactive mode
-
-```powershell
-cd d:\Tools\angular_attributes_renaming\ts
-
-# Top-level menu (find / report / rename / remove / commit / quit)
-node .\dist\angular_io_tool.js
-
-# Wizard for one command (asks for missing fields)
-node .\dist\angular_io_tool.js find
-node .\dist\angular_io_tool.js report
-node .\dist\angular_io_tool.js rename
-node .\dist\angular_io_tool.js remove
-node .\dist\angular_io_tool.js commit
-
-# Force prompts even if some flags are present
-node .\dist\angular_io_tool.js find --interactive
-node .\dist\angular_io_tool.js find -i --selector abx-icon
-```
-
-### What each wizard asks
-
-| Command | Prompts (in order) |
+| Command | Prompts |
 |---|---|
-| `find` | selector → inputs → outputs → roots → confirm |
-| `report` | selector → inputs → outputs → format → output file → roots → confirm |
-| `rename` | selector → rename pairs (`old=new`) → roots → apply? → confirm |
-| `remove` | selector → inputs → outputs → roots → apply? → confirm |
+| `find` | selector → inputs → outputs → roots (if unset) → logs/runs dirs (if unset) → confirm |
+| `report` | selector → inputs → outputs → format → output → roots → logs/runs → confirm |
+| `rename` | selector → rename pairs → roots → apply? → logs/runs/impact (if unset) → confirm |
+| `remove` | selector → inputs/outputs → roots → apply? → logs/runs/impact (if unset) → confirm |
 | `commit` | hash → branch-name → target-branch → title → body → confirm |
 
-- Press **Enter** to accept defaults (e.g. roots = current directory, apply = no / dry-run).
-- Type **`q`** to cancel.
-- Full CLI flags still work with **no prompts** when required options are provided.
-
-### After a dry-run (interactive rename/remove)
-
-If you started interactively and chose dry-run, the tool can ask:
-
-```text
-Dry-run complete. Apply these changes now? [y/N]
-```
+Enter accepts defaults. After a dry-run in interactive rename/remove, you can choose to apply immediately.
 
 ---
 
-## TypeScript-only: run logging
+## Impact area logging (`rename` / `remove` + `--apply`)
 
-Every TS run writes a log (unless disabled) so you can track which repos/files were touched.
+On every successful apply, ngpilot appends **one record per individual binding change** (two renames on the same line → two rows).
 
-| Option | Meaning |
+| Field | Description |
 |---|---|
-| *(default)* | Writes `d:\Tools\angular_attributes_renaming\logs\run-<timestamp>.log` |
-| `--log PATH` | Write that specific log file |
-| `--no-log` | Disable logging for this run |
+| `id` | UUIDv7 per record |
+| `github-user-name` | See resolution below |
+| `timestamp` | ISO-8601 time of the apply |
+| `selector` | Component selector you searched (e.g. `abx-icon`) |
+| `operation-name` | `rename` or `remove` |
+| `attribute-affected` | Attribute name (e.g. `fillColor`) |
+| `notes` | e.g. `Renamed fillColor to foregroundColor`, `Removed isCustomIcon` |
+| `repository-affected` | Repo label (e.g. `components-base-v1`) |
+| `component-affected` | Owning component selector (see below) |
+| `file/line-affected` | `D:\...\file.html:42` |
 
-Log contents include:
+### GitHub username resolution
 
-- timestamp and command
-- selector / inputs / outputs / rename / apply
-- roots
-- repos and files affected
-- change-run hash (after `--apply`)
-- local commit repo/branch/sha summary (after `commit`)
-- full console transcript (ANSI stripped)
+1. `NGPILOT_GITHUB_USER` / `GITHUB_USER`
+2. Saved config `githubUserName`
+3. `gh api user -q .login` (if `gh` is logged in) — then saved
+4. Interactive prompt (TTY) — then saved
+5. `git config user.name` (not necessarily a GitHub login)
+6. Empty string
 
-Example:
+### `component-affected` resolution
 
-```powershell
-node .\dist\angular_io_tool.js rename `
-  --selector abx-icon `
-  --rename isCustomIcon=isCustom `
-  --roots D:\angular-repos `
-  --log D:\Tools\angular_attributes_renaming\logs\my-rename.log
-```
+1. Nearby `.ts` with `templateUrl` pointing at the HTML (same folder, including `*.component.ts`)
+2. Else same-stem siblings (`abx-table.html` → `abx-table.ts` / `abx-table.component.ts`)
+3. `@Component` `selector: 'literal'` **or** same-file `const` string (e.g. `$COMPONENT_NAME`)
+4. Else HTML stem (`abx-table.html` → `abx-table`)
+5. Else empty (imported selectors are not followed)
+
+Dry-runs do **not** write impact records.
 
 ---
 
-## TypeScript-only: change runs + `commit`
+## Change runs + local commit
 
-When `rename` / `remove` runs with **`--apply`**, the tool records a **change-run hash** under:
-
-```text
-d:\Tools\angular_attributes_renaming\logs\runs\<hash>.json
-d:\Tools\angular_attributes_renaming\logs\runs\index.json
-```
+When `rename` / `remove` runs with **`--apply`**, a **change-run hash** is stored under the configured runs directory (default `logs/runs/`).
 
 Each run stores per-repo file snapshots (`before` / `after`) so `commit` can stage **only the tool hunks**, even if the working tree has other local edits.
 
-`commit` is **local only** — it does **not** push or open PRs, and does **not** need `GIT_ACCESS_TOKEN`. Push/PR are left to you (or a separate tool).
-
-### Commit command
-
 ```powershell
-$tool = "d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js"
-
-# Interactive
-node $tool commit
-
-# Flags
-node $tool commit <hash> `
-  --branch-name feature/rename-isCustomIcon `
-  --target-branch qa `
-  --title "refactor(abx-icon): rename isCustomIcon to isCustom" `
-  --body "Automated template binding rename across consumers."
-```
-
-What `commit` does per affected repo:
-
-1. **Stash** local dirty changes (so rename `--apply` worktrees do not block checkout)
-2. Resolve `--target-branch` (local or `origin/<target>` when available)
-3. Create / reset `--branch-name` from that target
-4. Apply **only** the recorded tool patches and stage those files
-5. Create a **local** commit with the same title/body in every repo
-6. Restore your previous branch and stash
-7. Print **repo name**, **branch name**, and **commit sha**
-
-You can reuse an existing change-run hash after `--apply` — you do not need to re-rename first.
-
-Then push/open PRs yourself, e.g.:
-
-```powershell
-cd <repo>
-git checkout bugfix/rename-fillColor
-git push -u origin HEAD
+ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom --roots D:\angular-repos --apply
+# note the printed hash
+ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon"
+# then push / open PRs yourself
 ```
 
 ---
 
-## Typical end-to-end flow
+## Run logging
 
-### Python (flag-based)
+Every command writes a transcript by default (ANSI stripped) under the logs directory, unless `--no-log` or a custom `--log <file>` is used.
 
-```powershell
-$tool = "d:\Tools\angular_attributes_renaming\angular_io_tool.py"
-$roots = "D:\angular-repos"
+Logged metadata includes command, selector, roots, apply flag, change-run hash, and impacted files.
 
-python $tool find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots $roots
-python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots
-python $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots --apply
-# Review in GitHub Desktop, commit manually
-```
+---
 
-### TypeScript (interactive or flags + commit)
+## Typical workflow
 
 ```powershell
-$tool = "d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js"
-$roots = "D:\angular-repos"
+$env:NGPILOT_ROOTS = "D:\angular-repos"
+$env:NGPILOT_GITHUB_USER = "your-github-login"
 
-node $tool find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]" --roots $roots
-node $tool rename --selector abx-icon --rename isCustomIcon=isCustom --roots $roots --apply
-# Note the printed change-run hash, then:
-node $tool commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon"
-# then push / open PRs yourself using the printed repo + branch list
+ngpilot find --selector abx-icon --inputs "[isCustomIcon, isUtilityIcon]"
+ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom
+ngpilot rename --selector abx-icon --rename isCustomIcon=isCustom --apply
+# Review impact JSON/CSV paths printed by the tool
+ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon"
 ```
 
 ---
 
-## Output & review tips
+## Behavior notes
 
-### Clickable paths
+### Grouping
 
-```text
-D:\orektic\products\my-app\src\app\header\header.component.html:18:3
-```
-
-Ctrl+Click in the Cursor/VS Code terminal. Used by `find`, `report` summaries, and each `rename` / `remove` change line.
-
-### Repository labels
-
-Grouped by project/repo under your `--roots` (or git toplevel when applicable) so you can open the right repo in GitHub Desktop.
+Results are grouped by project/repo under your roots (or git toplevel when applicable).
 
 ### Dry-run vs `--apply`
 
 | Mode | Behavior |
 |---|---|
 | Default (no `--apply`) | Preview only |
-| `--apply` | Writes HTML files on disk |
+| `--apply` | Writes HTML, records change-run, appends impact rows |
 
-No automatic git commit, branch, or PR.
+### Existing local feature branch on `commit`
 
-### Environment
+If `--branch-name` already exists locally, ngpilot checks it out and **hard-resets it to `--target-branch`** before applying tool hunks — prior commits on that feature branch are discarded.
 
-- Set `NO_COLOR=1` to disable colored terminal output.
+### Patch isolation on `commit`
 
----
+For each file, ngpilot builds the feature-branch content in this order:
 
-## Parity checking (Python vs TypeScript)
+1. Exact match of apply-time `before` / already-applied `after` on the target tip  
+2. Hardened unified patch (`before` → `after` onto target tip, multiple context/fuzz levels)  
+3. **Semantic re-apply** of the recorded rename/remove onto the target-tip HTML (preserves unrelated tip edits)  
+4. Last resort: write the apply-time `after` snapshot (warning printed; review the PR)
 
-While validating the TS port, run the same command on both and compare counts / file edits, e.g. against `_fixture`:
-
-```powershell
-$fix = "d:\Tools\angular_attributes_renaming\_fixture"
-$args = @("find","--roots",$fix,"--selector","abx-icon","--inputs","isCustomIcon,isUtilityIcon")
-
-python d:\Tools\angular_attributes_renaming\angular_io_tool.py @args
-node d:\Tools\angular_attributes_renaming\ts\dist\angular_io_tool.js @args --no-log
-```
+After a **successful** local commit, ngpilot returns to your previous branch and **discards** the tool-touched files there (they live on `--branch-name` now). Unrelated local changes from the stash are kept. If commit fails for a repo, apply-time file contents are restored.
 
 ---
 
-## What this tool does *not* do
+## Limitations
 
 - Does not modify `.ts` / `.js` component class files (`@Input`, `@Output`, aliases)
 - Does not rename the component selector itself
-- Does not create git branches, commits, or pull requests
-- Does not search inside skipped build folders (`node_modules`, `dist`, etc.)
+- Does not push remotes or open pull requests
+- Impact `component-affected` does not resolve selectors imported from other files
 
 After renaming template bindings, update the component TypeScript definitions separately if those API names are changing too.
 
@@ -523,23 +411,23 @@ After renaming template bindings, update the component TypeScript definitions se
 
 ## Quick reference
 
-### Python
-
 ```text
-python angular_io_tool.py find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...]
-python angular_io_tool.py report --selector SEL [--inputs ...] [--outputs ...] [--format markdown|json] [-o FILE] [--roots ...]
-python angular_io_tool.py rename --selector SEL --rename old=new[,...] [--apply] [--roots ...]
-python angular_io_tool.py remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--roots ...]
+ngpilot find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...]
+ngpilot report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
+ngpilot rename --selector SEL --rename old=new[,...] [--apply] [--impact-log PATH] [--roots ...]
+ngpilot remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--impact-log PATH] [--roots ...]
+ngpilot commit [HASH] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT]
+
+Shared: [--logs-dir DIR] [--runs-dir DIR] [--log FILE] [--no-log] [-i]
 ```
 
-### TypeScript
+---
 
-```text
-node dist/angular_io_tool.js                          # interactive menu
-node dist/angular_io_tool.js find                     # interactive find
-node dist/angular_io_tool.js find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...] [--log PATH] [--no-log]
-node dist/angular_io_tool.js report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
-node dist/angular_io_tool.js rename --selector SEL --rename old=new[,...] [--apply] [--roots ...]
-node dist/angular_io_tool.js remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--roots ...]
-node dist/angular_io_tool.js commit [HASH] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT]
+## Tests
+
+```powershell
+cd d:\Tools\ngpilot\ts
+npm test
 ```
+
+Runs local-commit fixture tests plus impact/config/help tests.

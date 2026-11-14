@@ -85,6 +85,7 @@ export function encodeWithNewline(text: string, newline: "\r\n" | "\n"): string 
 /**
  * Apply the tool's before→after delta onto a base file (usually target-branch tip).
  * Newlines are normalized for matching; output preserves the base file's newline style.
+ * Tries multiple context sizes and fuzz factors for mild drift.
  */
 export function applyToolDelta(
   base: string,
@@ -104,34 +105,64 @@ export function applyToolDelta(
     return encodeWithNewline(baseN, newline);
   }
 
-  const patchText = createTwoFilesPatch(
-    "before",
-    "after",
-    beforeN,
-    afterN,
-    "",
-    "",
-    { context: 3 }
-  );
-  const patches = parsePatch(patchText);
-  if (!patches.length) {
-    throw new Error("Could not compute a patch between before/after contents");
+  const contextSizes = [3, 1, 0];
+  const fuzzFactors = [2, 5, 8];
+
+  for (const context of contextSizes) {
+    const patchText = createTwoFilesPatch(
+      "before",
+      "after",
+      beforeN,
+      afterN,
+      "",
+      "",
+      { context }
+    );
+    const patches = parsePatch(patchText);
+    if (!patches.length) {
+      continue;
+    }
+    for (const fuzzFactor of fuzzFactors) {
+      const patched = applyPatch(baseN, patches[0], { fuzzFactor });
+      if (patched !== false) {
+        return encodeWithNewline(patched, newline);
+      }
+    }
   }
 
-  let patched = applyPatch(baseN, patches[0], { fuzzFactor: 2 });
-  if (patched === false) {
-    // Retry with more fuzz for minor context drift.
-    patched = applyPatch(baseN, patches[0], { fuzzFactor: 5 });
+  throw new Error(
+    "Patch isolation failed: the target-branch file no longer matches the " +
+      "pre-change snapshot closely enough to apply only the tool hunks " +
+      "(after newline normalization)."
+  );
+}
+
+/** Drop the most recent stash entry without applying it. */
+export function stashDrop(repoRoot: string): boolean {
+  const result = git(repoRoot, ["stash", "drop"], { allowFail: true });
+  return result.status === 0;
+}
+
+/** Restore paths on the current branch to HEAD (discard worktree + index). */
+export function restorePathsToHead(
+  repoRoot: string,
+  relativePaths: string[]
+): void {
+  if (!relativePaths.length) {
+    return;
   }
-  if (patched === false) {
-    throw new Error(
-      "Patch isolation failed: the target-branch file no longer matches the " +
-        "pre-change snapshot closely enough to apply only the tool hunks " +
-        "(after newline normalization). Rebase/update and re-run rename/remove, " +
-        "or resolve manually."
-    );
+  const restored = git(
+    repoRoot,
+    ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...relativePaths],
+    { allowFail: true }
+  );
+  if (restored.status === 0) {
+    return;
   }
-  return encodeWithNewline(patched, newline);
+  // Older git without `restore`: fall back to checkout.
+  git(repoRoot, ["checkout", "HEAD", "--", ...relativePaths], {
+    allowFail: true,
+  });
 }
 
 export function readFileAtRef(
