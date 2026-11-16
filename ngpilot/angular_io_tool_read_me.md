@@ -1,5 +1,20 @@
 # ngpilot
 
+# Index
+- [Installation guide](#installation-guide)
+- [Requirements](#requirements)
+- [Configuration resolution](#configuration-resolution)
+- [CLI help](#cli-help)
+- [Shared Options](#shared-options)
+- [Commands](#commands)
+- [Interactive Mode](#interactive-mode)
+- [Impact Area Logging](#impact-area-logging)
+- [Change Runs](#change-runs)
+- [Typical Workflow](#typical-workflow)
+- [Behaviour Notes](#behaviour-notes)
+- [Limitations](#limitations)
+- [Quick Reference](#quick-reference)
+
 Multi-repository Angular template tooling: **find**, **report**, **rename**, and **remove** component input/output bindings in HTML, then optionally create **local commits** from a recorded apply run.
 
 The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgrep (`rg`)** for fast HTML search, then parses each matching opening tag so multi-line usages and camelCase / kebab-case bindings are handled correctly.
@@ -19,8 +34,19 @@ The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgre
 
 A legacy Python reference (`angular_io_tool.py`) remains in the repo for parity on find/report/rename/remove only. New features (interactive config, impact logs, local commit, env/user config) are **TypeScript / ngpilot only**.
 
+<a id="installation-guide"></a>
+## Installation guide
+
+- Make a classic github PAT (Personal Access Token). It should have read access to github packages. Your github username must be allowed for accessing that package(Ask the maintainer to give you access to ngpilot package).
+- Authenticate with GitHub (one-time setup)<br>
+`npm login --scope=@Orektic --registry=https://npm.pkg.github.com`
+- Install globally <br>
+`npm install -g @Orektic/ngpilot`
+- Execute<br>
+`ngpilot --help`
 ---
 
+<a id="requirements"></a>
 ## Requirements
 
 - **ripgrep (`rg`)** on your `PATH`
@@ -56,6 +82,7 @@ npm run ngpilot -- --help
 
 ---
 
+<a id="configuration-resolution"></a>
 ## Configuration resolution
 
 For roots, logs directory, runs directory, impact log path, and GitHub username, ngpilot resolves values in this order (highest first):
@@ -137,6 +164,7 @@ After a successful `--apply`, the tool prints the resolved impact JSON and CSV p
 
 ---
 
+<a id="cli-help"></a>
 ## CLI help
 
 ```powershell
@@ -152,6 +180,7 @@ Main and command help include the configuration priority, environment variables,
 
 ---
 
+<a id="shared-options"></a>
 ## Shared options
 
 ### `--selector`
@@ -210,6 +239,7 @@ Pass the TypeScript-style name (`isCustomIcon`); kebab-case in templates is matc
 
 ---
 
+<a id="commands"></a>
 ## Commands
 
 ### `find`
@@ -272,6 +302,7 @@ Per repo: stash → resolve target → create/reset feature branch from target (
 
 ---
 
+<a id="interactive-mode"></a>
 ## Interactive mode
 
 ```powershell
@@ -292,6 +323,7 @@ Enter accepts defaults. After a dry-run in interactive rename/remove, you can ch
 
 ---
 
+<a id="impact-area-logging"></a>
 ## Impact area logging (`rename` / `remove` + `--apply`)
 
 On every successful apply, ngpilot appends **one record per individual binding change** (two renames on the same line → two rows).
@@ -330,6 +362,7 @@ Dry-runs do **not** write impact records.
 
 ---
 
+<a id="change-runs"></a>
 ## Change runs + local commit
 
 When `rename` / `remove` runs with **`--apply`**, a **change-run hash** is stored under the configured runs directory (default `logs/runs/`).
@@ -345,6 +378,7 @@ ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --tit
 
 ---
 
+<a id="run-logging"></a>
 ## Run logging
 
 Every command writes a transcript by default (ANSI stripped) under the logs directory, unless `--no-log` or a custom `--log <file>` is used.
@@ -353,6 +387,7 @@ Logged metadata includes command, selector, roots, apply flag, change-run hash, 
 
 ---
 
+<a id="typical-workflow"></a>
 ## Typical workflow
 
 ```powershell
@@ -368,6 +403,7 @@ ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --tit
 
 ---
 
+<a id="behaviour-notes"></a>
 ## Behavior notes
 
 ### Grouping
@@ -398,6 +434,7 @@ After a **successful** local commit, ngpilot returns to your previous branch and
 
 ---
 
+<a id="limitations"></a>
 ## Limitations
 
 - Does not modify `.ts` / `.js` component class files (`@Input`, `@Output`, aliases)
@@ -409,6 +446,7 @@ After renaming template bindings, update the component TypeScript definitions se
 
 ---
 
+<a id="quick-reference"></a>
 ## Quick reference
 
 ```text

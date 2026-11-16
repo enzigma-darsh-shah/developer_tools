@@ -1,6 +1,6 @@
 {
   "name": "@orektic/ngpilot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A multi-repository Angular code discovery, refactoring and automation toolkit.",
   "bin": {
     "ngpilot": "./dist/angular_io_tool.js"
