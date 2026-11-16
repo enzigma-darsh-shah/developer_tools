@@ -36,6 +36,10 @@ import {
   USER_CONFIG_HINT,
 } from "./paths";
 import {
+  printFixIoNamesSummary,
+  runFixIoNames,
+} from "./fix_io_names";
+import {
   printRemoveUnusedSummary,
   runRemoveUnused,
 } from "./remove_unused";
@@ -98,6 +102,7 @@ interface CommandOptions {
     | "rename"
     | "remove"
     | "remove-unused"
+    | "fix-io-names"
     | "commit";
   selector: string;
   inputs: string[];
@@ -113,6 +118,7 @@ interface CommandOptions {
   impactLog?: string;
   logsDir?: string;
   runsDir?: string;
+  nameDict?: string;
   // commit-only
   commitHash?: string;
   /** One or more change-run hashes (multi-hash commit). */
@@ -1947,10 +1953,11 @@ async function topLevelMenu(): Promise<CommandOptions["command"]> {
   console.log("  3) rename         - rename bindings (dry-run by default)");
   console.log("  4) remove         - remove bindings (dry-run by default)");
   console.log("  5) remove-unused  - find unused @Input/@Output and remove");
-  console.log("  6) commit         - local commit of recorded change run(s)");
-  console.log("  7) quit");
+  console.log("  6) fix-io-names   - fix @Input/@Output naming standards");
+  console.log("  7) commit         - local commit of recorded change run(s)");
+  console.log("  8) quit");
   while (true) {
-    const choice = (await ask(rl, "Choose [1-7]: ")).trim();
+    const choice = (await ask(rl, "Choose [1-8]: ")).trim();
     if (choice === "1" || choice.toLowerCase() === "find") {
       rl.close();
       return "find";
@@ -1975,15 +1982,23 @@ async function topLevelMenu(): Promise<CommandOptions["command"]> {
       rl.close();
       return "remove-unused";
     }
-    if (choice === "6" || choice.toLowerCase() === "commit") {
+    if (
+      choice === "6" ||
+      choice.toLowerCase() === "fix-io-names" ||
+      choice.toLowerCase() === "fix-names"
+    ) {
+      rl.close();
+      return "fix-io-names";
+    }
+    if (choice === "7" || choice.toLowerCase() === "commit") {
       rl.close();
       return "commit";
     }
-    if (choice === "7" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
+    if (choice === "8" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
       rl.close();
       process.exit(0);
     }
-    console.log(yellow("Enter 1-7."));
+    console.log(yellow("Enter 1-8."));
   }
 }
 
@@ -1994,8 +2009,8 @@ function needsInteractive(opts: Partial<CommandOptions>): boolean {
   if (!opts.command) {
     return true;
   }
-  if (opts.command === "remove-unused") {
-    // Always interactive for unused-attribute decisions / inline parse prompts.
+  if (opts.command === "remove-unused" || opts.command === "fix-io-names") {
+    // Always interactive for per-attribute decisions / inline parse prompts.
     return true;
   }
   if (opts.command === "commit") {
@@ -2139,6 +2154,68 @@ async function interactiveRemoveUnused(
   return opts;
 }
 
+async function interactiveFixIoNames(
+  rl: readline.Interface,
+  partial: Partial<CommandOptions>
+): Promise<CommandOptions> {
+  console.log(bold("\nInteractive fix-io-names\n"));
+  console.log(
+    dim(
+      "Scans @Component @Input/@Output names for standards (no output 'on' prefix; camelCase), prompts before each rename."
+    )
+  );
+  const roots = await promptRoots(rl, partial.roots || []);
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: true });
+  let nameDict = partial.nameDict;
+  if (!nameDict && !process.env.NGPILOT_NAME_DICT?.trim()) {
+    const raw = await promptText(
+      rl,
+      "Optional custom name dictionary file (Enter = built-in only)",
+      { required: false, exitOnQuit: false }
+    );
+    if (raw.toLowerCase() === "q") {
+      console.log("Cancelled.");
+      process.exit(130);
+    }
+    if (raw.trim()) {
+      nameDict = raw.trim();
+    }
+  }
+  const opts: CommandOptions = {
+    command: "fix-io-names",
+    selector: "",
+    inputs: [],
+    outputs: [],
+    roots,
+    interactive: true,
+    log: partial.log,
+    noLog: partial.noLog,
+    impactLog: paths.impactLog || partial.impactLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
+    nameDict,
+  };
+  console.log();
+  console.log(bold("About to run:"));
+  console.log(`  command:   fix-io-names`);
+  console.log(
+    `  roots:     ${opts.roots.length ? opts.roots.join("; ") : "(cwd)"}`
+  );
+  console.log(
+    `  name-dict: ${
+      nameDict ||
+      process.env.NGPILOT_NAME_DICT?.trim() ||
+      "(built-in)"
+    }`
+  );
+  console.log();
+  if (!(await promptYesNo(rl, "Proceed?", true))) {
+    console.log("Cancelled.");
+    process.exit(130);
+  }
+  return opts;
+}
+
 async function maybePrompt(
   partial: Partial<CommandOptions>
 ): Promise<CommandOptions> {
@@ -2165,6 +2242,7 @@ async function maybePrompt(
       impactLog: partial.impactLog,
       logsDir: partial.logsDir,
       runsDir: partial.runsDir,
+      nameDict: partial.nameDict,
       commitHash: partial.commitHash,
       commitHashes: partial.commitHashes,
       branchName: partial.branchName,
@@ -2192,6 +2270,9 @@ async function maybePrompt(
     }
     if (command === "remove-unused") {
       return await interactiveRemoveUnused(rl, base);
+    }
+    if (command === "fix-io-names") {
+      return await interactiveFixIoNames(rl, base);
     }
     return await interactiveCommit(rl, base);
   } finally {
@@ -2426,6 +2507,102 @@ async function executeRemoveUnused(
   }
 }
 
+async function executeFixIoNames(
+  opts: CommandOptions,
+  roots: string[]
+): Promise<void> {
+  console.log(bold("fix-io-names"));
+  console.log(
+    dim(
+      "Scanning @Input/@Output names for standards; prompting before each rename."
+    )
+  );
+  console.log();
+
+  const rl = createRl();
+  try {
+    const summary = await runFixIoNames(roots, {
+      skipDirNames: SKIP_DIR_NAMES,
+      nameDictFiles: opts.nameDict ? [opts.nameDict] : [],
+      renameHtmlApply: async ({
+        selector,
+        roots: searchRoots,
+        renameMap,
+        impactLog,
+      }) => {
+        const keys = Object.keys(renameMap);
+        let usages = collectUsages(selector, searchRoots, keys, keys);
+        for (const usage of usages) {
+          usage.bindings = usage.bindings.filter(
+            (b) => b.propertyName in renameMap
+          );
+        }
+        usages = usages.filter((u) => u.bindings.length);
+        const plans = planRenames(usages, renameMap);
+        if (!plans.length) {
+          return { repos: [], files: [] };
+        }
+        const result = await applyPlans(plans, true, {
+          command: "rename",
+          selector,
+          roots: searchRoots,
+          inputs: keys,
+          outputs: keys,
+          renameMap,
+          impactLog: impactLog || opts.impactLog,
+          interactive: true,
+        });
+        return {
+          repos: result.repos,
+          files: result.files,
+          runHash: result.runHash,
+        };
+      },
+      promptText: (message, promptOpts) =>
+        promptText(rl, message, {
+          ...(promptOpts || {}),
+          exitOnQuit: promptOpts?.exitOnQuit ?? false,
+        }),
+      promptFixDecision: (message) => promptUnusedDecision(rl, message),
+      log: opts.log,
+      impactLog: opts.impactLog,
+      onProgress: (message) => console.log(dim(message)),
+    });
+
+    const transcript = resolveLogPath(opts);
+    if (transcript) {
+      summary.transcriptLogPath = transcript;
+    }
+    printFixIoNamesSummary(summary);
+
+    writeRunLog(
+      opts,
+      roots,
+      [
+        `fix-io-names summary`,
+        `quitMidRun: ${summary.quitMidRun}`,
+        `components scanned: ${summary.componentsScanned}`,
+        `violations found: ${summary.violationsFound}`,
+        `renamed: ${summary.renamed}`,
+        `skipped N/NC/NR: ${summary.skippedByUser}/${summary.skippedViaNc}/${summary.skippedViaNr}`,
+        `tsRenameWarnings: ${summary.tsRenameWarnings}`,
+        `affected repos: ${summary.affectedRepos.join(", ") || "(none)"}`,
+        `hashes: ${summary.changeRunHashes.join(" ") || "(none)"}`,
+        `detail log: ${summary.logPath}`,
+        ...(summary.impactJsonPath
+          ? [`impact json: ${summary.impactJsonPath}`]
+          : []),
+        ...(summary.impactCsvPath
+          ? [`impact csv: ${summary.impactCsvPath}`]
+          : []),
+      ],
+      transcript
+    );
+  } finally {
+    rl.close();
+  }
+}
+
 function applyRuntimePaths(opts: CommandOptions): void {
   if (opts.logsDir) {
     persistLogsDir(opts.logsDir);
@@ -2479,6 +2656,11 @@ async function runCommand(opts: CommandOptions): Promise<void> {
 
   if (opts.command === "remove-unused") {
     await executeRemoveUnused(opts, roots);
+    return;
+  }
+
+  if (opts.command === "fix-io-names") {
+    await executeFixIoNames(opts, roots);
     return;
   }
 
@@ -2647,10 +2829,12 @@ Environment variables:
   NGPILOT_RUNS          directory for change-run JSON files
   NGPILOT_IMPACT_LOG    path to impact .csv/.json (sibling pair is maintained)
   NGPILOT_GITHUB_USER   GitHub username for impact records (fallback: GITHUB_USER)
+  NGPILOT_NAME_DICT     optional extra word list for fix-io-names (one word/line)
 
 PowerShell examples:
   $env:NGPILOT_ROOTS = "D:\\angular-repos;D:\\other-repos"
   $env:NGPILOT_IMPACT_LOG = "D:\\folder\\nested\\their_file_name.csv"
+  $env:NGPILOT_NAME_DICT = "D:\\path\\my-words.txt"
   [System.Environment]::SetEnvironmentVariable("NGPILOT_ROOTS", "D:\\angular-repos", "User")
 `.trim();
 
@@ -2686,8 +2870,8 @@ function buildProgram(): {
     .description(
       [
         "Multi-repo Angular template tooling: find, report, rename, remove,",
-        "remove-unused (@Input/@Output audit), then optionally create local",
-        "commits from recorded apply runs (supports multiple hashes).",
+        "remove-unused, fix-io-names (@Input/@Output naming standards), then",
+        "optionally create local commits from recorded apply runs.",
         "",
         CONFIG_HELP,
       ].join("\n")
@@ -2705,7 +2889,10 @@ function buildProgram(): {
     });
 
   const wire = (
-    name: Exclude<CommandOptions["command"], "commit" | "remove-unused">,
+    name: Exclude<
+      CommandOptions["command"],
+      "commit" | "remove-unused" | "fix-io-names"
+    >,
     configure: (c: Command) => Command
   ): void => {
     const c = configure(
@@ -2874,6 +3061,75 @@ function buildProgram(): {
     };
   });
 
+  const FIX_IO_HELP = `
+Name dictionary:
+  Built-in word list ships with the package (used to split names like validchange → validChange).
+  Optional user dictionary (plain text, one word per line, # comments allowed):
+    --name-dict D:\\path\\my-words.txt
+    $env:NGPILOT_NAME_DICT = "D:\\path\\my-words.txt"
+  CLI --name-dict and NGPILOT_NAME_DICT are merged with the built-in list.
+`.trim();
+
+  const fixIoCmd = addSharedOptions(
+    program
+      .command("fix-io-names")
+      .description(
+        [
+          "Find @Input/@Output names that violate standards (Outputs must not start with 'on';",
+          "names must be camelCase) and interactively rename HTML usages + TypeScript members.",
+        ].join(" ")
+      )
+      .option(
+        "--impact-log <path>",
+        "Impact log .csv/.json path (sibling pair maintained; overrides NGPILOT_IMPACT_LOG; saved to user config)"
+      )
+      .option(
+        "--name-dict <path>",
+        "Extra word list for camelCase segmentation (one word per line; # comments OK). Also: NGPILOT_NAME_DICT"
+      )
+      .addHelpText("after", `\n${FIX_IO_HELP}\n\n${CONFIG_HELP}\n`)
+  );
+  fixIoCmd.action((options: Record<string, unknown>) => {
+    const roots = [
+      ...((options.roots as string[]) || []),
+      ...((options.root as string[]) || []),
+    ];
+    partial = {
+      command: "fix-io-names",
+      selector: "",
+      inputs: [],
+      outputs: [],
+      roots,
+      interactive: true,
+      log:
+        typeof options.log === "string"
+          ? options.log
+          : typeof program.opts().log === "string"
+            ? (program.opts().log as string)
+            : undefined,
+      noLog:
+        options.log === false ||
+        program.opts().log === false ||
+        process.argv.includes("--no-log"),
+      impactLog:
+        typeof options.impactLog === "string"
+          ? (options.impactLog as string)
+          : undefined,
+      logsDir:
+        typeof options.logsDir === "string"
+          ? (options.logsDir as string)
+          : undefined,
+      runsDir:
+        typeof options.runsDir === "string"
+          ? (options.runsDir as string)
+          : undefined,
+      nameDict:
+        typeof options.nameDict === "string"
+          ? (options.nameDict as string)
+          : undefined,
+    };
+  });
+
   const commitCmd = addSharedOptions(
     program
       .command("commit")
@@ -2970,6 +3226,7 @@ async function main(): Promise<void> {
     "rename",
     "remove",
     "remove-unused",
+    "fix-io-names",
     "commit",
   ];
   if (!partial.command && commands.includes(argv[0])) {

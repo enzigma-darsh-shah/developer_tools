@@ -6,13 +6,14 @@
     "ngpilot": "./dist/angular_io_tool.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-data.js",
     "start": "npm run build && node dist/angular_io_tool.js",
     "ngpilot": "node dist/angular_io_tool.js",
-    "test": "npm run build && node scripts/test-local-commit.js && node scripts/test-impact-and-config.js && node scripts/test-remove-unused.js",
+    "test": "npm run build && node scripts/test-local-commit.js && node scripts/test-impact-and-config.js && node scripts/test-remove-unused.js && node scripts/test-fix-io-names.js",
     "test:commit": "npm run build && node scripts/test-local-commit.js",
     "test:impact": "npm run build && node scripts/test-impact-and-config.js",
-    "test:remove-unused": "npm run build && node scripts/test-remove-unused.js"
+    "test:remove-unused": "npm run build && node scripts/test-remove-unused.js",
+    "test:fix-io-names": "npm run build && node scripts/test-fix-io-names.js"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

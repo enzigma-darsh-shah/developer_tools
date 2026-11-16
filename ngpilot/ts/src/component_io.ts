@@ -434,3 +434,137 @@ export function applyIoMemberRemoval(
     return { ok: false, error: String(err) };
   }
 }
+
+export interface IoRenameTarget {
+  kind: IoKind;
+  /** Current public API name (alias or property). */
+  publicName: string;
+  /** Current TypeScript property name. */
+  propertyName: string;
+  /** New public API name for templates. */
+  newPublicName: string;
+  /**
+   * New TS property name. When omitted, uses newPublicName if property
+   * previously matched publicName; otherwise keeps propertyName.
+   */
+  newPropertyName?: string;
+}
+
+/**
+ * Rename @Input/@Output public API (alias) and/or property in component source.
+ * Option C: HTML uses newPublicName; alias updated; property renamed when needed.
+ */
+export function renameIoMemberInSource(
+  source: string,
+  target: IoRenameTarget
+): { source: string } | { error: string } {
+  const members = parseIoMembers(source).filter((m) => m.kind === target.kind);
+  const matches = members.filter(
+    (m) =>
+      m.publicName === target.publicName ||
+      m.propertyName === target.propertyName
+  );
+  if (!matches.length) {
+    return {
+      error: `Could not find @${target.kind === "input" ? "Input" : "Output"} '${target.publicName}' in TypeScript source`,
+    };
+  }
+  const exact = matches.filter((m) => m.publicName === target.publicName);
+  const member = (exact.length ? exact : matches)[0];
+  const newProp =
+    target.newPropertyName ??
+    (member.propertyName === member.publicName
+      ? target.newPublicName
+      : member.propertyName);
+
+  let chunk = source.slice(member.start, member.end);
+  const decor = target.kind === "input" ? "Input" : "Output";
+
+  // Normalize decorator to @Input('newPublic') or bare @Input() when names align
+  const decorRe = new RegExp(`@${decor}\\s*(?:\\([^)]*\\))?`);
+  if (newProp === target.newPublicName) {
+    chunk = chunk.replace(decorRe, `@${decor}()`);
+  } else {
+    chunk = chunk.replace(
+      decorRe,
+      `@${decor}('${target.newPublicName}')`
+    );
+  }
+
+  // Rename property / setter name (first identifier after decorator / set)
+  const propRe = new RegExp(
+    `(\\b(?:set\\s+)?)(${member.propertyName.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    )})\\b`
+  );
+  let replacedProp = false;
+  chunk = chunk.replace(propRe, (_m, prefix: string, _name: string) => {
+    replacedProp = true;
+    return `${prefix}${newProp}`;
+  });
+  if (!replacedProp && member.propertyName !== newProp) {
+    return {
+      error: `Could not rename TypeScript property '${member.propertyName}' to '${newProp}'`,
+    };
+  }
+
+  let next = source.slice(0, member.start) + chunk + source.slice(member.end);
+
+  // Best-effort: rename this.oldProp references in the same file
+  if (member.propertyName !== newProp) {
+    const thisRe = new RegExp(
+      `\\bthis\\.${member.propertyName.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+      )}\\b`,
+      "g"
+    );
+    next = next.replace(thisRe, `this.${newProp}`);
+  }
+
+  return { source: next };
+}
+
+export function applyIoMemberRename(
+  filePath: string,
+  target: IoRenameTarget
+): { ok: true } | { ok: false; error: string } {
+  let source: string;
+  try {
+    source = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+  const result = renameIoMemberInSource(source, target);
+  if ("error" in result) {
+    return { ok: false, error: result.error };
+  }
+  try {
+    fs.writeFileSync(filePath, result.source, "utf8");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/** True if another member already uses this public or property name. */
+export function hasIoNameCollision(
+  members: IoMember[],
+  candidate: string,
+  except?: { publicName: string; propertyName: string }
+): boolean {
+  for (const m of members) {
+    if (
+      except &&
+      m.publicName === except.publicName &&
+      m.propertyName === except.propertyName
+    ) {
+      continue;
+    }
+    if (m.publicName === candidate || m.propertyName === candidate) {
+      return true;
+    }
+  }
+  return false;
+}

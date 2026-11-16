@@ -15,7 +15,7 @@
 - [Limitations](#limitations)
 - [Quick Reference](#quick-reference)
 
-Multi-repository Angular template tooling: **find**, **report**, **rename**, **remove**, and **remove-unused** for component input/output bindings, then optionally create **local commits** from recorded apply runs.
+Multi-repository Angular template tooling: **find**, **report**, **rename**, **remove**, **remove-unused**, and **fix-io-names** for component input/output bindings, then optionally create **local commits** from recorded apply runs.
 
 The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgrep (`rg`)** for fast HTML search, then parses each matching opening tag so multi-line usages and camelCase / kebab-case bindings are handled correctly.
 
@@ -26,10 +26,11 @@ The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgre
 | Rename properties | `rename` | Renames bindings in templates (dry-run by default) |
 | Remove properties | `remove` | Removes bindings from templates (dry-run by default) |
 | Remove unused APIs | `remove-unused` | Audits `@Input`/`@Output`, prompts per unused attr, removes HTML + TS |
+| Fix I/O names | `fix-io-names` | Audits naming standards, prompts per violation, renames HTML + TS |
 | Local commit | `commit` | Creates local commits for one or more recorded apply-runs (no push/PR) |
 | Impact tracking | (on `--apply`) | Appends per-binding rows to centralized JSON + CSV logs |
 
-**Scope:** `find` / `report` / `rename` / `remove` are HTML templates only. `remove-unused` also best-effort deletes `@Input`/`@Output` members in the defining component `.ts`.
+**Scope:** `find` / `report` / `rename` / `remove` are HTML templates only. `remove-unused` and `fix-io-names` also best-effort update `@Input`/`@Output` members in the defining component `.ts`.
 
 **Matching rule:** only real attribute / binding **names** are matched — not the same text inside quoted values (e.g. `[abcd]="obj.isCustomIcon"` or `*ngIf="... == 'table'"` are ignored when searching for `isCustomIcon` / `table`).
 
@@ -104,6 +105,7 @@ For roots, logs directory, runs directory, impact log path, and GitHub username,
 | `NGPILOT_IMPACT_LOG` | Impact log file (JSON+CSV sibling pair) | Absolute file path |
 | `NGPILOT_GITHUB_USER` | GitHub username for impact rows | String |
 | `GITHUB_USER` | Fallback if `NGPILOT_GITHUB_USER` unset | String |
+| `NGPILOT_NAME_DICT` | Extra word list for `fix-io-names` segmentation | Absolute file path |
 
 If only `NGPILOT_LOGS` is set:
 
@@ -317,6 +319,43 @@ ngpilot remove-unused --roots D:\angular-repos
 ngpilot remove-unused --log D:\ngpilot-data\unused-run.log
 ```
 
+### `fix-io-names`
+
+Audits decorator `@Input` / `@Output` **public names** against naming standards (signals out of scope):
+
+1. **Outputs must not start with `on`** (case-insensitive)  
+2. **Names must be proper camelCase** (e.g. `validchange` → suggest `validChange`)
+
+Word segmentation uses a built-in dictionary (`ts/data/name-words.txt`, copied to `dist/data/`). Optional extras:
+
+```powershell
+ngpilot fix-io-names --name-dict D:\path\my-words.txt
+$env:NGPILOT_NAME_DICT = "D:\path\my-words.txt"
+```
+
+Dictionary format: plain text, one word per line, `#` comments allowed. CLI `--name-dict` and `NGPILOT_NAME_DICT` are **merged** with the built-in list.
+
+Workflow:
+
+1. Resolve selector / parse members (same inline prompts as `remove-unused`)  
+2. For each naming violation → prompt with repo, class, selector, attribute, rules, suggested name, defining file  
+3. On **Yes**: confirm/edit suggested name (re-prompt on collision or invalid identifier) → HTML rename across roots + best-effort TS rename (alias/property; warn & continue if TS fails)  
+4. End (or **Q**) writes `logs/fix-io-names-<timestamp>.log` and prints hashes, affected repos, log/impact paths, and counts
+
+Controls (shown once; prompt `[Y/n/nc/nr/q]`):
+
+| Key | Meaning |
+|---|---|
+| `Y` | Rename this attribute (then confirm/edit suggested name) |
+| `N` / Enter | Skip this attribute only (default) |
+| `NC` | Skip remaining violations on **this component** |
+| `NR` | Skip remaining violations in **this repository** |
+| `Q` | Quit early (still writes log + prints the same end summary) |
+
+```powershell
+ngpilot fix-io-names --roots D:\angular-repos
+ngpilot fix-io-names --name-dict D:\path\my-words.txt --log D:\ngpilot-data\fix-io.log
+```
 
 ### `commit` (local only)
 
@@ -347,6 +386,7 @@ ngpilot rename -i
 | `report` | selector → inputs → outputs → format → output → roots → logs/runs → confirm |
 | `rename` | selector → rename pairs → roots → apply? → logs/runs/impact (if unset) → confirm |
 | `remove-unused` | roots → logs/runs/impact (if unset) → confirm → inline selector/attr prompts → per-unused delete? (default No) |
+| `fix-io-names` | roots → logs/runs/impact (if unset) → optional name-dict → confirm → inline prompts → per-violation rename? (default No) |
 | `remove` | selector → inputs/outputs → roots → apply? → logs/runs/impact (if unset) → confirm |
 | `commit` | hash → branch-name → target-branch → title → body → confirm |
 
@@ -468,13 +508,13 @@ After a **successful** local commit, ngpilot returns to your previous branch and
 <a id="limitations"></a>
 ## Limitations
 
-- `find` / `report` / `rename` / `remove` do not modify `.ts` component class files (except `remove-unused`, which best-effort deletes unused `@Input`/`@Output` members)
+- `find` / `report` / `rename` / `remove` do not modify `.ts` component class files (except `remove-unused` / `fix-io-names`, which best-effort update `@Input`/`@Output` members)
 - Does not rename the component selector itself
 - Does not push remotes or open pull requests
 - Impact `component-affected` does not resolve selectors imported from other files
-- `remove-unused` does not parse Angular signal `input()` / `output()` APIs yet
+- `remove-unused` / `fix-io-names` do not parse Angular signal `input()` / `output()` APIs yet
 
-After renaming template bindings with `rename`, update the component TypeScript definitions separately if those API names are changing too.
+After renaming template bindings with `rename` alone, update the component TypeScript definitions separately if those API names are changing too (`fix-io-names` updates both).
 
 ---
 
@@ -487,6 +527,7 @@ ngpilot report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
 ngpilot rename --selector SEL --rename old=new[,...] [--apply] [--impact-log PATH] [--roots ...]
 ngpilot remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--impact-log PATH] [--roots ...]
 ngpilot remove-unused [--roots ...] [--impact-log PATH] [--log FILE]
+ngpilot fix-io-names  [--roots ...] [--impact-log PATH] [--name-dict FILE] [--log FILE]
 ngpilot commit [HASH ...] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT]
 
 Shared: [--logs-dir DIR] [--runs-dir DIR] [--log FILE] [--no-log] [-i]
@@ -501,4 +542,4 @@ cd d:\Tools\ngpilot\ts
 npm test
 ```
 
-Runs local-commit, impact/config, and remove-unused tests.
+Runs local-commit, impact/config, remove-unused, and fix-io-names tests.
