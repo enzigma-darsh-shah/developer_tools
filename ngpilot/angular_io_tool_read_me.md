@@ -15,7 +15,7 @@
 - [Limitations](#limitations)
 - [Quick Reference](#quick-reference)
 
-Multi-repository Angular template tooling: **find**, **report**, **rename**, and **remove** component input/output bindings in HTML, then optionally create **local commits** from a recorded apply run.
+Multi-repository Angular template tooling: **find**, **report**, **rename**, **remove**, and **remove-unused** for component input/output bindings, then optionally create **local commits** from recorded apply runs.
 
 The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgrep (`rg`)** for fast HTML search, then parses each matching opening tag so multi-line usages and camelCase / kebab-case bindings are handled correctly.
 
@@ -25,10 +25,11 @@ The CLI binary is **`ngpilot`** (`ts/dist/angular_io_tool.js`). It uses **ripgre
 | Usage report | `report` | Writes a Markdown or JSON report |
 | Rename properties | `rename` | Renames bindings in templates (dry-run by default) |
 | Remove properties | `remove` | Removes bindings from templates (dry-run by default) |
-| Local commit | `commit` | Creates local commits for a recorded apply-run (tool hunks only; no push/PR) |
+| Remove unused APIs | `remove-unused` | Audits `@Input`/`@Output`, prompts per unused attr, removes HTML + TS |
+| Local commit | `commit` | Creates local commits for one or more recorded apply-runs (no push/PR) |
 | Impact tracking | (on `--apply`) | Appends per-binding rows to centralized JSON + CSV logs |
 
-**Scope:** HTML templates only (`.html`). It does **not** edit TypeScript `@Input()` / `@Output()` definitions.
+**Scope:** `find` / `report` / `rename` / `remove` are HTML templates only. `remove-unused` also best-effort deletes `@Input`/`@Output` members in the defining component `.ts`.
 
 **Matching rule:** only real attribute / binding **names** are matched — not the same text inside quoted values (e.g. `[abcd]="obj.isCustomIcon"` or `*ngIf="... == 'table'"` are ignored when searching for `isCustomIcon` / `table`).
 
@@ -289,16 +290,45 @@ ngpilot remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-rep
 ngpilot remove --selector abx-icon --inputs isUtilityIcon --roots D:\angular-repos --apply
 ```
 
+### `remove-unused`
+
+Audits decorator `@Input` / `@Output` APIs on every `@Component` under roots (signals out of scope).
+
+1. Resolve selector (literal / same-file const); **prompt inline** if unknown (Enter = skip component)  
+2. Parse inputs/outputs (aliases + setters); **prompt inline** if a name can’t be parsed (Enter = skip attribute)  
+3. One batched HTML find per component for all of its public API names  
+4. Write a detailed log (`logs/remove-unused-<timestamp>.log` or `--log`) with per-attribute occurrence counts — **not** dumped to the CLI  
+5. For each attribute with **0** HTML hits → prompt with repo, class name, selector, attribute, defining file  
+6. On **Yes**: HTML `remove --apply` + best-effort TS member delete (warn & continue if TS delete fails)  
+7. End (or **Q** quit) writes the detail log and prints hashes, affected repos, log/impact paths, and counts
+
+Unused-attribute controls (shown once at start; prompt `[Y/n/nc/nr/q]`):
+
+| Key | Meaning |
+|---|---|
+| `Y` | Remove this unused attribute |
+| `N` / Enter | Skip this attribute only (default) |
+| `NC` | Skip remaining unused attributes on **this component** |
+| `NR` | Skip remaining unused attributes in **this repository** |
+| `Q` | Quit early (still writes log + prints the same end summary) |
+
+```powershell
+ngpilot remove-unused --roots D:\angular-repos
+ngpilot remove-unused --log D:\ngpilot-data\unused-run.log
+```
+
+
 ### `commit` (local only)
 
-Creates local feature-branch commits from a recorded `--apply` change-run hash. **No push, no PR, no token.**
+Creates local feature-branch commits from one or more recorded `--apply` change-run hashes. **No push, no PR, no token.**
 
 ```powershell
 ngpilot commit
 ngpilot commit <hash> --branch-name feature/rename-icon --target-branch qa --title "rename isCustomIcon" --body "..."
+ngpilot commit hash1 hash2 hash3 --branch-name feature/cleanup --target-branch qa --title "remove unused APIs"
 ```
 
-Per repo: stash → resolve target → create/reset feature branch from target (existing local branch is hard-reset to target) → apply tool hunks only → local commit → restore previous branch/stash → print repo / branch / sha.
+Per repo (per hash): stash → resolve target → create/reset feature branch from target (existing local branch is hard-reset to target) → apply tool hunks only → local commit → restore previous branch and discard tool-touched files on the original branch → print repo / branch / sha.
 
 ---
 
@@ -316,6 +346,7 @@ ngpilot rename -i
 | `find` | selector → inputs → outputs → roots (if unset) → logs/runs dirs (if unset) → confirm |
 | `report` | selector → inputs → outputs → format → output → roots → logs/runs → confirm |
 | `rename` | selector → rename pairs → roots → apply? → logs/runs/impact (if unset) → confirm |
+| `remove-unused` | roots → logs/runs/impact (if unset) → confirm → inline selector/attr prompts → per-unused delete? (default No) |
 | `remove` | selector → inputs/outputs → roots → apply? → logs/runs/impact (if unset) → confirm |
 | `commit` | hash → branch-name → target-branch → title → body → confirm |
 
@@ -437,12 +468,13 @@ After a **successful** local commit, ngpilot returns to your previous branch and
 <a id="limitations"></a>
 ## Limitations
 
-- Does not modify `.ts` / `.js` component class files (`@Input`, `@Output`, aliases)
+- `find` / `report` / `rename` / `remove` do not modify `.ts` component class files (except `remove-unused`, which best-effort deletes unused `@Input`/`@Output` members)
 - Does not rename the component selector itself
 - Does not push remotes or open pull requests
 - Impact `component-affected` does not resolve selectors imported from other files
+- `remove-unused` does not parse Angular signal `input()` / `output()` APIs yet
 
-After renaming template bindings, update the component TypeScript definitions separately if those API names are changing too.
+After renaming template bindings with `rename`, update the component TypeScript definitions separately if those API names are changing too.
 
 ---
 
@@ -454,7 +486,8 @@ ngpilot find   --selector SEL [--inputs ...] [--outputs ...] [--roots ...]
 ngpilot report --selector SEL [--format markdown|json] [-o FILE] [--roots ...]
 ngpilot rename --selector SEL --rename old=new[,...] [--apply] [--impact-log PATH] [--roots ...]
 ngpilot remove --selector SEL (--inputs ... | --outputs ...) [--apply] [--impact-log PATH] [--roots ...]
-ngpilot commit [HASH] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT]
+ngpilot remove-unused [--roots ...] [--impact-log PATH] [--log FILE]
+ngpilot commit [HASH ...] --branch-name NAME --target-branch BASE --title TEXT [--body TEXT]
 
 Shared: [--logs-dir DIR] [--runs-dir DIR] [--log FILE] [--no-log] [-i]
 ```
@@ -468,4 +501,4 @@ cd d:\Tools\ngpilot\ts
 npm test
 ```
 
-Runs local-commit fixture tests plus impact/config/help tests.
+Runs local-commit, impact/config, and remove-unused tests.

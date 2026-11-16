@@ -36,6 +36,10 @@ import {
   USER_CONFIG_HINT,
 } from "./paths";
 import {
+  printRemoveUnusedSummary,
+  runRemoveUnused,
+} from "./remove_unused";
+import {
   ChangeRun,
   generateRunHash,
   saveChangeRun,
@@ -88,7 +92,13 @@ interface FileChangePlan {
 }
 
 interface CommandOptions {
-  command: "find" | "report" | "rename" | "remove" | "commit";
+  command:
+    | "find"
+    | "report"
+    | "rename"
+    | "remove"
+    | "remove-unused"
+    | "commit";
   selector: string;
   inputs: string[];
   outputs: string[];
@@ -105,6 +115,8 @@ interface CommandOptions {
   runsDir?: string;
   // commit-only
   commitHash?: string;
+  /** One or more change-run hashes (multi-hash commit). */
+  commitHashes?: string[];
   branchName?: string;
   targetBranch?: string;
   commitTitle?: string;
@@ -1481,9 +1493,14 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
 async function promptText(
   rl: readline.Interface,
   label: string,
-  opts: { defaultValue?: string; required?: boolean } = {}
+  opts: {
+    defaultValue?: string;
+    required?: boolean;
+    /** When false, typing q returns "q" instead of exiting the process. */
+    exitOnQuit?: boolean;
+  } = {}
 ): Promise<string> {
-  const { defaultValue, required } = opts;
+  const { defaultValue, required, exitOnQuit = true } = opts;
   const suffix =
     defaultValue !== undefined && defaultValue !== ""
       ? ` [${defaultValue}]`
@@ -1494,6 +1511,9 @@ async function promptText(
     const raw = await ask(rl, `${label}${suffix}: `);
     const value = raw.trim();
     if (value.toLowerCase() === "q") {
+      if (!exitOnQuit) {
+        return "q";
+      }
       console.log("Cancelled.");
       process.exit(130);
     }
@@ -1507,6 +1527,31 @@ async function promptText(
       return "";
     }
     console.log(yellow("This value is required. Enter a value, or q to quit."));
+  }
+}
+
+async function promptUnusedDecision(
+  rl: readline.Interface,
+  label: string
+): Promise<"yes" | "no" | "nc" | "nr" | "q"> {
+  while (true) {
+    const raw = (await ask(rl, `${label} [Y/n/nc/nr/q]: `)).trim().toLowerCase();
+    if (!raw || raw === "n" || raw === "no") {
+      return "no";
+    }
+    if (raw === "y" || raw === "yes") {
+      return "yes";
+    }
+    if (raw === "nc") {
+      return "nc";
+    }
+    if (raw === "nr") {
+      return "nr";
+    }
+    if (raw === "q" || raw === "quit") {
+      return "q";
+    }
+    console.log(yellow("Please answer Y, N, NC, NR, or Q."));
   }
 }
 
@@ -1894,19 +1939,18 @@ async function interactiveRemove(
   return opts;
 }
 
-async function topLevelMenu(): Promise<
-  "find" | "report" | "rename" | "remove" | "commit"
-> {
+async function topLevelMenu(): Promise<CommandOptions["command"]> {
   const rl = createRl();
   console.log(bold("ngpilot"));
-  console.log("  1) find    - locate input/output usages");
-  console.log("  2) report  - write markdown/json report");
-  console.log("  3) rename  - rename bindings (dry-run by default)");
-  console.log("  4) remove  - remove bindings (dry-run by default)");
-  console.log("  5) commit  - local commit of a recorded change run");
-  console.log("  6) quit");
+  console.log("  1) find           - locate input/output usages");
+  console.log("  2) report         - write markdown/json report");
+  console.log("  3) rename         - rename bindings (dry-run by default)");
+  console.log("  4) remove         - remove bindings (dry-run by default)");
+  console.log("  5) remove-unused  - find unused @Input/@Output and remove");
+  console.log("  6) commit         - local commit of recorded change run(s)");
+  console.log("  7) quit");
   while (true) {
-    const choice = (await ask(rl, "Choose [1-6]: ")).trim();
+    const choice = (await ask(rl, "Choose [1-7]: ")).trim();
     if (choice === "1" || choice.toLowerCase() === "find") {
       rl.close();
       return "find";
@@ -1923,15 +1967,23 @@ async function topLevelMenu(): Promise<
       rl.close();
       return "remove";
     }
-    if (choice === "5" || choice.toLowerCase() === "commit") {
+    if (
+      choice === "5" ||
+      choice.toLowerCase() === "remove-unused" ||
+      choice.toLowerCase() === "unused"
+    ) {
+      rl.close();
+      return "remove-unused";
+    }
+    if (choice === "6" || choice.toLowerCase() === "commit") {
       rl.close();
       return "commit";
     }
-    if (choice === "6" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
+    if (choice === "7" || choice.toLowerCase() === "q" || choice.toLowerCase() === "quit") {
       rl.close();
       process.exit(0);
     }
-    console.log(yellow("Enter 1-6."));
+    console.log(yellow("Enter 1-7."));
   }
 }
 
@@ -1942,9 +1994,19 @@ function needsInteractive(opts: Partial<CommandOptions>): boolean {
   if (!opts.command) {
     return true;
   }
+  if (opts.command === "remove-unused") {
+    // Always interactive for unused-attribute decisions / inline parse prompts.
+    return true;
+  }
   if (opts.command === "commit") {
+    const hashes =
+      opts.commitHashes && opts.commitHashes.length
+        ? opts.commitHashes
+        : opts.commitHash
+          ? [opts.commitHash]
+          : [];
     return !(
-      opts.commitHash &&
+      hashes.length &&
       opts.branchName &&
       opts.targetBranch &&
       opts.commitTitle
@@ -1971,9 +2033,20 @@ async function interactiveCommit(
   partial: Partial<CommandOptions>
 ): Promise<CommandOptions> {
   console.log(bold("\nInteractive commit (local only — no push/PR)\n"));
-  const commitHash =
-    partial.commitHash ||
-    (await promptText(rl, "Change run hash id", { required: true }));
+  let commitHashes =
+    partial.commitHashes && partial.commitHashes.length
+      ? partial.commitHashes
+      : partial.commitHash
+        ? [partial.commitHash]
+        : [];
+  if (!commitHashes.length) {
+    const raw = await promptText(
+      rl,
+      "Change run hash id(s) (space-separated for multiple)",
+      { required: true }
+    );
+    commitHashes = raw.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
+  }
   const branchName =
     partial.branchName ||
     (await promptText(rl, "Feature branch name (--branch-name)", {
@@ -1998,7 +2071,8 @@ async function interactiveCommit(
     inputs: [],
     outputs: [],
     roots: [],
-    commitHash,
+    commitHash: commitHashes[0],
+    commitHashes,
     branchName,
     targetBranch,
     commitTitle,
@@ -2007,15 +2081,56 @@ async function interactiveCommit(
     interactive: true,
     log: partial.log,
     noLog: partial.noLog,
+    logsDir: partial.logsDir,
+    runsDir: partial.runsDir,
   };
 
   console.log();
   console.log(bold("About to run local commit:"));
-  console.log(`  hash:           ${opts.commitHash}`);
+  console.log(`  hash(es):       ${commitHashes.join(", ")}`);
   console.log(`  branch-name:    ${opts.branchName}`);
   console.log(`  target-branch:  ${opts.targetBranch}`);
   console.log(`  title:          ${opts.commitTitle}`);
   console.log(`  body:           ${opts.commitBody || "(none)"}`);
+  console.log();
+  if (!(await promptYesNo(rl, "Proceed?", true))) {
+    console.log("Cancelled.");
+    process.exit(130);
+  }
+  return opts;
+}
+
+async function interactiveRemoveUnused(
+  rl: readline.Interface,
+  partial: Partial<CommandOptions>
+): Promise<CommandOptions> {
+  console.log(bold("\nInteractive remove-unused\n"));
+  console.log(
+    dim(
+      "Scans @Component @Input/@Output APIs, finds unused HTML bindings, and prompts before each deletion."
+    )
+  );
+  const roots = await promptRoots(rl, partial.roots || []);
+  const paths = await ensurePersistentPaths(rl, partial, { needImpact: true });
+  const opts: CommandOptions = {
+    command: "remove-unused",
+    selector: "",
+    inputs: [],
+    outputs: [],
+    roots,
+    interactive: true,
+    log: partial.log,
+    noLog: partial.noLog,
+    impactLog: paths.impactLog || partial.impactLog,
+    logsDir: paths.logsDir || partial.logsDir,
+    runsDir: paths.runsDir || partial.runsDir,
+  };
+  console.log();
+  console.log(bold("About to run:"));
+  console.log(`  command:  remove-unused`);
+  console.log(
+    `  roots:    ${opts.roots.length ? opts.roots.join("; ") : "(cwd)"}`
+  );
   console.log();
   if (!(await promptYesNo(rl, "Proceed?", true))) {
     console.log("Cancelled.");
@@ -2051,6 +2166,7 @@ async function maybePrompt(
       logsDir: partial.logsDir,
       runsDir: partial.runsDir,
       commitHash: partial.commitHash,
+      commitHashes: partial.commitHashes,
       branchName: partial.branchName,
       targetBranch: partial.targetBranch,
       commitTitle: partial.commitTitle,
@@ -2073,6 +2189,9 @@ async function maybePrompt(
     }
     if (command === "remove") {
       return await interactiveRemove(rl, base);
+    }
+    if (command === "remove-unused") {
+      return await interactiveRemoveUnused(rl, base);
     }
     return await interactiveCommit(rl, base);
   } finally {
@@ -2122,8 +2241,14 @@ function normalizeSelector(selector: string): string {
 }
 
 async function executeCommit(opts: CommandOptions): Promise<void> {
-  if (!opts.commitHash) {
-    fail("Provide a change run hash (argument or --hash)");
+  const hashes =
+    opts.commitHashes && opts.commitHashes.length
+      ? opts.commitHashes
+      : opts.commitHash
+        ? [opts.commitHash]
+        : [];
+  if (!hashes.length) {
+    fail("Provide one or more change run hashes (arguments or --hash)");
   }
   if (!opts.branchName) {
     fail("Provide --branch-name");
@@ -2136,47 +2261,56 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
   }
 
   console.log(bold("Local commit (no push / no PR)"));
-  console.log(`  hash:          ${opts.commitHash}`);
+  console.log(`  hash(es):      ${hashes.join(", ")}`);
   console.log(`  branch-name:   ${opts.branchName}`);
   console.log(`  target-branch: ${opts.targetBranch}`);
   console.log(`  title:         ${opts.commitTitle}`);
   console.log();
 
-  const { run, results } = await runCommitCommand({
-    hash: opts.commitHash,
-    branchName: opts.branchName,
-    targetBranch: opts.targetBranch,
-    title: opts.commitTitle,
-    body: opts.commitBody || "",
-    dryRun: Boolean(opts.commitDryRun),
-  });
+  const allSuccessLines: string[] = [];
+  const logExtra: string[] = [];
+  let lastRoots: string[] = [];
 
-  console.log(bold(`Results for run ${run.hash}:`));
-  const successLines: string[] = [];
-  for (const result of results) {
-    if (result.error) {
-      console.log(red(`  ✗ ${result.repoName}: ${result.error}`));
-    } else {
-      console.log(green(`  ✓ ${result.repoName}`));
-      console.log(`      branch: ${result.branchName}`);
-      if (result.commitSha) {
-        console.log(dim(`      commit: ${result.commitSha}`));
+  for (const hash of hashes) {
+    console.log(bold(`--- change run ${hash} ---`));
+    const { run, results } = await runCommitCommand({
+      hash,
+      branchName: opts.branchName,
+      targetBranch: opts.targetBranch,
+      title: opts.commitTitle,
+      body: opts.commitBody || "",
+      dryRun: Boolean(opts.commitDryRun),
+    });
+    lastRoots = run.roots;
+    logExtra.push(`change run: ${run.hash}`);
+    for (const result of results) {
+      if (result.error) {
+        console.log(red(`  ✗ ${result.repoName}: ${result.error}`));
+        logExtra.push(`  error ${result.repoName}: ${result.error}`);
+      } else {
+        console.log(green(`  ✓ ${result.repoName}`));
+        console.log(`      branch: ${result.branchName}`);
+        if (result.commitSha) {
+          console.log(dim(`      commit: ${result.commitSha}`));
+        }
+        const line = `${result.repoName}\t${result.branchName}\t${
+          result.commitSha || ""
+        }\t${hash}`;
+        allSuccessLines.push(line);
+        logExtra.push(`  - ${line}`);
       }
-      successLines.push(
-        `${result.repoName}\t${result.branchName}\t${result.commitSha || ""}`
-      );
-    }
-    if (result.warnings?.length) {
-      for (const warning of result.warnings) {
-        console.log(yellow(`      warning: ${warning}`));
+      if (result.warnings?.length) {
+        for (const warning of result.warnings) {
+          console.log(yellow(`      warning: ${warning}`));
+        }
       }
     }
+    console.log();
   }
 
-  if (successLines.length) {
-    console.log();
-    console.log(bold("Local commits ready (repo / branch / sha):"));
-    for (const line of successLines) {
+  if (allSuccessLines.length) {
+    console.log(bold("Local commits ready (repo / branch / sha / hash):"));
+    for (const line of allSuccessLines) {
       console.log(`  ${line}`);
     }
     console.log(
@@ -2189,22 +2323,107 @@ async function executeCommit(opts: CommandOptions): Promise<void> {
   const logPath = resolveLogPath(opts);
   writeRunLog(
     opts,
-    run.roots,
+    lastRoots,
     [
-      `change run: ${run.hash}`,
+      `hashes: ${hashes.join(", ")}`,
       `branch: ${opts.branchName}`,
       `target: ${opts.targetBranch}`,
       `title: ${opts.commitTitle}`,
       "local commits:",
-      ...(successLines.length
-        ? successLines.map((l) => `  - ${l}`)
+      ...(allSuccessLines.length
+        ? allSuccessLines.map((l) => `  - ${l}`)
         : ["  (none)"]),
-      ...results
-        .filter((r) => r.error)
-        .map((r) => `  error ${r.repoName}: ${r.error}`),
+      ...logExtra.filter((l) => l.startsWith("  error")),
     ],
     logPath
   );
+}
+
+async function executeRemoveUnused(
+  opts: CommandOptions,
+  roots: string[]
+): Promise<void> {
+  console.log(bold("remove-unused"));
+  console.log(
+    dim(
+      "Indexing @Component files, checking HTML usages, prompting only for unused attributes."
+    )
+  );
+  console.log();
+
+  const rl = createRl();
+  try {
+    const summary = await runRemoveUnused(roots, {
+      skipDirNames: SKIP_DIR_NAMES,
+      collectUsages: (selector, searchRoots, inputs, outputs) =>
+        collectUsages(selector, searchRoots, inputs, outputs),
+      removeHtmlApply: async ({
+        selector,
+        roots: searchRoots,
+        inputs,
+        outputs,
+        impactLog,
+      }) => {
+        const usages = collectUsages(selector, searchRoots, inputs, outputs);
+        const plans = planRemovals(usages, inputs, outputs);
+        const result = await applyPlans(plans, true, {
+          command: "remove",
+          selector,
+          roots: searchRoots,
+          inputs,
+          outputs,
+          impactLog: impactLog || opts.impactLog,
+          interactive: true,
+        });
+        return {
+          repos: result.repos,
+          files: result.files,
+          runHash: result.runHash,
+        };
+      },
+      promptText: (message, promptOpts) =>
+        promptText(rl, message, {
+          ...(promptOpts || {}),
+          exitOnQuit: false,
+        }),
+      promptUnusedDecision: (message) => promptUnusedDecision(rl, message),
+      log: opts.log,
+      impactLog: opts.impactLog,
+      onProgress: (message) => console.log(dim(message)),
+    });
+
+    const transcript = resolveLogPath(opts);
+    if (transcript) {
+      summary.transcriptLogPath = transcript;
+    }
+    printRemoveUnusedSummary(summary);
+
+    writeRunLog(
+      opts,
+      roots,
+      [
+        `remove-unused summary`,
+        `quitMidRun: ${summary.quitMidRun}`,
+        `components scanned: ${summary.componentsScanned}`,
+        `unused found: ${summary.unusedFound}`,
+        `removed: ${summary.removed}`,
+        `skipped N/NC/NR: ${summary.skippedByUser}/${summary.skippedViaNc}/${summary.skippedViaNr}`,
+        `tsRemovalWarnings: ${summary.tsRemovalWarnings}`,
+        `affected repos: ${summary.affectedRepos.join(", ") || "(none)"}`,
+        `hashes: ${summary.changeRunHashes.join(" ") || "(none)"}`,
+        `detail log: ${summary.logPath}`,
+        ...(summary.impactJsonPath
+          ? [`impact json: ${summary.impactJsonPath}`]
+          : []),
+        ...(summary.impactCsvPath
+          ? [`impact csv: ${summary.impactCsvPath}`]
+          : []),
+      ],
+      transcript
+    );
+  } finally {
+    rl.close();
+  }
 }
 
 function applyRuntimePaths(opts: CommandOptions): void {
@@ -2257,6 +2476,12 @@ async function runCommand(opts: CommandOptions): Promise<void> {
     rootsInput = resolveRootsInput(null).roots ?? null;
   }
   const roots = normalizeRoots(rootsInput ?? null);
+
+  if (opts.command === "remove-unused") {
+    await executeRemoveUnused(opts, roots);
+    return;
+  }
+
   const selector = normalizeSelector(opts.selector);
   opts.selector = selector;
 
@@ -2460,9 +2685,9 @@ function buildProgram(): {
     .name("ngpilot")
     .description(
       [
-        "Multi-repo Angular template tooling: find, report, rename, or remove",
-        "component input/output bindings (HTML only), then optionally create",
-        "local commits from a recorded apply run.",
+        "Multi-repo Angular template tooling: find, report, rename, remove,",
+        "remove-unused (@Input/@Output audit), then optionally create local",
+        "commits from recorded apply runs (supports multiple hashes).",
         "",
         CONFIG_HELP,
       ].join("\n")
@@ -2480,7 +2705,7 @@ function buildProgram(): {
     });
 
   const wire = (
-    name: Exclude<CommandOptions["command"], "commit">,
+    name: Exclude<CommandOptions["command"], "commit" | "remove-unused">,
     configure: (c: Command) => Command
   ): void => {
     const c = configure(
@@ -2596,14 +2821,73 @@ function buildProgram(): {
       .addHelpText("after", `\n${CONFIG_HELP}\n`)
   );
 
+  const removeUnusedCmd = addSharedOptions(
+    program
+      .command("remove-unused")
+      .description(
+        [
+          "Scan @Component @Input/@Output APIs under roots, find unused HTML bindings,",
+          "prompt per unused attribute (default No), and on Yes remove templates (--apply)",
+          "plus best-effort TypeScript member deletion. Writes a detailed remove-unused log.",
+        ].join(" ")
+      )
+      .option(
+        "--impact-log <path>",
+        "Impact log .csv/.json path (sibling pair maintained; overrides NGPILOT_IMPACT_LOG; saved to user config)"
+      )
+      .addHelpText("after", `\n${CONFIG_HELP}\n`)
+  );
+  removeUnusedCmd.action((options: Record<string, unknown>) => {
+    const roots = [
+      ...((options.roots as string[]) || []),
+      ...((options.root as string[]) || []),
+    ];
+    partial = {
+      command: "remove-unused",
+      selector: "",
+      inputs: [],
+      outputs: [],
+      roots,
+      interactive: true,
+      log:
+        typeof options.log === "string"
+          ? options.log
+          : typeof program.opts().log === "string"
+            ? (program.opts().log as string)
+            : undefined,
+      noLog:
+        options.log === false ||
+        program.opts().log === false ||
+        process.argv.includes("--no-log"),
+      impactLog:
+        typeof options.impactLog === "string"
+          ? (options.impactLog as string)
+          : undefined,
+      logsDir:
+        typeof options.logsDir === "string"
+          ? (options.logsDir as string)
+          : undefined,
+      runsDir:
+        typeof options.runsDir === "string"
+          ? (options.runsDir as string)
+          : undefined,
+    };
+  });
+
   const commitCmd = addSharedOptions(
     program
       .command("commit")
       .description(
-        "Create local commits for a recorded rename/remove change run (no push/PR)"
+        "Create local commits for one or more recorded rename/remove change runs (no push/PR)"
       )
-      .argument("[hash]", "Change run hash id from a prior --apply")
-      .option("--hash <id>", "Change run hash id (alternative to argument)")
+      .argument(
+        "[hashes...]",
+        "Change run hash id(s) from prior --apply (space-separated)"
+      )
+      .option(
+        "--hash <id>",
+        "Change run hash id (alternative/additional to arguments)"
+      )
       .option("--branch-name <name>", "Feature branch to create locally")
       .option(
         "--target-branch <name>",
@@ -2613,17 +2897,21 @@ function buildProgram(): {
       .option("--body <text>", "Commit description")
       .option("--dry-run", "Prepare locally but skip creating the commit", false)
   );
-  commitCmd.action((hashArg: string | undefined, options: Record<string, unknown>) => {
+  commitCmd.action((hashArgs: string[], options: Record<string, unknown>) => {
+    const fromArgs = (hashArgs || []).map((h) => String(h).trim()).filter(Boolean);
+    const fromOpt =
+      typeof options.hash === "string" && options.hash.trim()
+        ? [options.hash.trim()]
+        : [];
+    const commitHashes = [...fromArgs, ...fromOpt];
     partial = {
       command: "commit",
       selector: "",
       inputs: [],
       outputs: [],
       roots: [],
-      commitHash:
-        (hashArg as string) ||
-        (options.hash as string) ||
-        undefined,
+      commitHash: commitHashes[0],
+      commitHashes,
       branchName: (options.branchName as string) || undefined,
       targetBranch: (options.targetBranch as string) || undefined,
       commitTitle: (options.title as string) || undefined,
@@ -2676,7 +2964,14 @@ async function main(): Promise<void> {
   let partial = getPartial();
 
   // If user ran only `find` / `rename` etc., commander still fires action with empty opts.
-  const commands = ["find", "report", "rename", "remove", "commit"];
+  const commands = [
+    "find",
+    "report",
+    "rename",
+    "remove",
+    "remove-unused",
+    "commit",
+  ];
   if (!partial.command && commands.includes(argv[0])) {
     partial = { ...partial, command: argv[0] as CommandOptions["command"] };
   }

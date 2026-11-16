@@ -64,8 +64,12 @@ export function ensureRunsDir(): void {
   ensureDir(getRunsDir());
 }
 
-function runPath(hash: string): string {
+export function getChangeRunPath(hash: string): string {
   return path.join(getRunsDir(), `${hash}.json`);
+}
+
+function runPath(hash: string): string {
+  return getChangeRunPath(hash);
 }
 
 export function generateRunHash(payload: Omit<ChangeRun, "hash">): string {
